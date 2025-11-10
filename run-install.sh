@@ -113,6 +113,21 @@ create_venv() {
         exit 1
     fi
 
+    # Install API dependencies
+    if [ -f "api/requirements.txt" ]; then
+        log_message "Installing API dependencies..."
+        uv pip install -r api/requirements.txt
+        log_message "API dependencies installed successfully."
+    else
+        log_message "Warning: api/requirements.txt not found. API may not work correctly."
+    fi
+
+    # Fix python-multipart alias (Gradio expects python_multipart but package installs as multipart)
+    if [ -f "api/fix_multipart.py" ]; then
+        log_message "Creating python_multipart alias for Gradio compatibility..."
+        python api/fix_multipart.py || log_message "Warning: Could not create multipart alias"
+    fi
+
     finish
 }
 
