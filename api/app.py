@@ -25,18 +25,27 @@ now_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.chdir(now_dir)
 sys.path.insert(0, now_dir)
 
+# Importar configurações
+from api.config import settings, print_config_summary
+
 # Importar funções do Applio
 from core import run_tts_script, load_voices_data
 from tabs.inference.inference import get_files, match_index, get_speakers_id
 from rvc.configs.config import Config, get_gpu_info
 import torch
 
-# Configurações
-OUTPUT_DIR = Path(now_dir) / "assets" / "audios"
+# Configurações de diretórios (usando settings)
+OUTPUT_DIR = Path(settings.OUTPUT_DIR)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+UPLOAD_DIR = Path(settings.UPLOAD_DIR)
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 # Variáveis globais
 _voices_data = None
+_whisper_model = None
+_WHISPER_READY = False
+_diarization_pipeline = None
+_DIARIZATION_READY = False
 
 
 def load_tts_voices():
@@ -47,12 +56,129 @@ def load_tts_voices():
     return _voices_data
 
 
+def load_whisper_model(model_size: str = "turbo", force_reload: bool = False):
+    """Carrega modelo Whisper V3 Turbo"""
+    global _whisper_model, _WHISPER_READY
+    
+    # Se já está carregado e não é para forçar reload, retornar o existente
+    if _whisper_model is not None and _WHISPER_READY and not force_reload:
+        # Se o modelo solicitado é diferente, avisar mas usar o carregado
+        if model_size != "turbo":
+            print(f"⚠️ Modelo {model_size} solicitado, mas turbo já está carregado. Usando turbo.")
+        return _whisper_model
+    
+    print(f"🔄 Carregando Whisper {model_size}...")
+    try:
+        import whisper
+        
+        # Whisper V3 Turbo é o modelo mais recente e rápido
+        # Se turbo não estiver disponível, tenta large-v3
+        try:
+            _whisper_model = whisper.load_model(model_size)
+        except Exception as e:
+            if model_size == "turbo":
+                print("⚠️ Modelo turbo não encontrado, usando large-v3...")
+                try:
+                    _whisper_model = whisper.load_model("large-v3")
+                except:
+                    print("⚠️ large-v3 também não encontrado, tentando large...")
+                    _whisper_model = whisper.load_model("large")
+            else:
+                raise
+        
+        _WHISPER_READY = True
+        print(f"✅ Whisper {model_size} carregado!")
+        return _whisper_model
+    except ImportError:
+        print(f"⚠️ Erro: openai-whisper não está instalado!")
+        print("   Instale com: pip install openai-whisper")
+        _WHISPER_READY = False
+        return None
+    except Exception as e:
+        print(f"⚠️ Erro ao carregar Whisper: {e}")
+        _WHISPER_READY = False
+        return None
+
+
+def load_diarization_pipeline():
+    """Carrega pipeline de diarização Pyannote (lazy loading)"""
+    global _diarization_pipeline, _DIARIZATION_READY
+    
+    if _diarization_pipeline is not None and _DIARIZATION_READY:
+        return _diarization_pipeline
+    
+    # Verificar se token está configurado
+    if not settings.has_pyannote_token:
+        print("⚠️ PYANNOTE_TOKEN não configurado. Diarização não está disponível.")
+        print("   Configure no arquivo .env ou variável de ambiente:")
+        print("   PYANNOTE_TOKEN=seu_token_huggingface")
+        _DIARIZATION_READY = False
+        return None
+    
+    print("🔄 Carregando pipeline de diarização Pyannote...")
+    try:
+        from pyannote.audio import Pipeline
+        
+        # Carregar pipeline de diarização usando token das configurações
+        _diarization_pipeline = Pipeline.from_pretrained(
+            settings.PYANNOTE_MODEL,
+            use_auth_token=settings.PYANNOTE_TOKEN
+        )
+        
+        # Mover para GPU se disponível
+        config = Config()
+        if config.device.startswith("cuda"):
+            _diarization_pipeline = _diarization_pipeline.to(torch.device(config.device))
+        
+        _DIARIZATION_READY = True
+        print("✅ Pipeline de diarização Pyannote carregado!")
+        return _diarization_pipeline
+    except ImportError:
+        print("⚠️ pyannote.audio não está instalado. Instale com: pip install pyannote.audio")
+        _DIARIZATION_READY = False
+        return None
+    except Exception as e:
+        print(f"⚠️ Erro ao carregar pipeline Pyannote: {e}")
+        print("   Verifique se o token do Hugging Face está configurado corretamente no .env")
+        _DIARIZATION_READY = False
+        return None
+
+
 # Lifespan event handler
 @asynccontextmanager
 async def lifespan(app_instance: FastAPI):
     """Gerencia o ciclo de vida da aplicação"""
     print("\n🔄 Inicializando API do Applio...")
+    
+    # Mostrar resumo das configurações
+    print_config_summary()
+    
     load_tts_voices()
+    
+    # Pré-carregar Whisper no startup se configurado
+    if settings.WHISPER_PRELOAD:
+        print(f"🔄 Pré-carregando Whisper {settings.WHISPER_MODEL_SIZE}...")
+        whisper_model = load_whisper_model(settings.WHISPER_MODEL_SIZE)
+        if whisper_model and _WHISPER_READY:
+            print(f"✅ Whisper {settings.WHISPER_MODEL_SIZE} pré-carregado!")
+        else:
+            print("⚠️ Whisper não foi carregado. Verifique os logs.")
+    else:
+        print("ℹ️ Whisper não será pré-carregado (WHISPER_PRELOAD=false)")
+    
+    # Pré-carregar diarização apenas se token estiver configurado E preload estiver habilitado
+    if settings.should_preload_diarization:
+        print("🔄 Pré-carregando pipeline de diarização...")
+        diarization_pipeline = load_diarization_pipeline()
+        if diarization_pipeline and _DIARIZATION_READY:
+            print("✅ Pipeline de diarização pré-carregado!")
+        else:
+            print("⚠️ Diarização não foi carregada. Verifique o token PYANNOTE_TOKEN no .env")
+    elif settings.has_pyannote_token and not settings.PYANNOTE_PRELOAD:
+        print("ℹ️ Diarização não será pré-carregada (PYANNOTE_PRELOAD=false)")
+    else:
+        print("ℹ️ Diarização não será pré-carregada (PYANNOTE_TOKEN não configurado)")
+    
     print("✅ API do Applio pronta!\n")
     
     yield  # Aplicação rodando
@@ -200,6 +326,26 @@ class SpeakerIDsResponse(BaseModel):
     model_path: str
     speaker_ids: List[int]
     total: int
+
+
+class SpeakerSegment(BaseModel):
+    """Segmento de fala de um speaker"""
+    speaker: str
+    start: float
+    end: float
+    text: str
+
+
+class TranscribeResponse(BaseModel):
+    """Response model para transcrição"""
+    success: bool
+    message: str
+    text: str
+    language: str
+    duration: float
+    segments: Optional[List[SpeakerSegment]] = None
+    speakers: Optional[List[str]] = None
+    word_timestamps: Optional[List[dict]] = None
 
 
 # ==================== Endpoints ====================
@@ -704,6 +850,197 @@ async def download_audio(filename: str):
         filename=filename,
         media_type="audio/wav"
     )
+
+
+@app.post("/transcribe", response_model=TranscribeResponse, tags=["Transcription"])
+async def transcribe_audio(
+    file: UploadFile = File(...),
+    language: Optional[str] = "pt",
+    enable_diarization: bool = True,
+    word_timestamps: bool = False,
+    model_size: str = "turbo"
+):
+    """
+    Transcrever áudio usando Whisper V3 Turbo com diarização Pyannote
+    
+    Este endpoint:
+    1. Transcreve o áudio usando Whisper V3 Turbo (modelo mais moderno e rápido)
+    2. Identifica diferentes speakers usando Pyannote diarization
+    3. Combina transcrição com identificação de speakers
+    
+    Args:
+        file: Arquivo de áudio para transcrever
+        language: Idioma do áudio (pt, en, es, etc.) ou 'auto' para detecção
+        enable_diarization: Ativar diarização para identificar speakers
+        word_timestamps: Incluir timestamps por palavra
+        model_size: Tamanho do modelo Whisper (turbo, large-v3, large, medium, small, base, tiny)
+    
+    Returns:
+        TranscribeResponse com texto transcrito e segmentos por speaker
+    """
+    try:
+        # Validar tipo de arquivo
+        allowed_extensions = {'.mp3', '.wav', '.m4a', '.flac', '.ogg', '.webm', '.mp4', '.aac'}
+        file_ext = Path(file.filename).suffix.lower()
+        
+        if file_ext not in allowed_extensions:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Formato de arquivo não suportado: {file_ext}. Use: {allowed_extensions}"
+            )
+        
+        # Usar modelo Whisper já carregado (pré-carregado no startup)
+        # Se o modelo solicitado for diferente do carregado, carregar o novo
+        if model_size != "turbo" or not _WHISPER_READY:
+            whisper_model = load_whisper_model(model_size)
+        else:
+            whisper_model = _whisper_model
+        
+        if not whisper_model or not _WHISPER_READY:
+            raise HTTPException(
+                status_code=503,
+                detail="Whisper não está pronto. Verifique os logs."
+            )
+        
+        # Salvar arquivo temporário
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        temp_filename = f"upload_{timestamp}{file_ext}"
+        temp_filepath = UPLOAD_DIR / temp_filename
+        
+        # Salvar conteúdo do arquivo
+        with open(temp_filepath, "wb") as f:
+            content = await file.read()
+            f.write(content)
+        
+        print(f"\n📝 Transcrevendo áudio...")
+        print(f"   Arquivo: {file.filename}")
+        print(f"   Idioma: {language}")
+        print(f"   Modelo: {model_size}")
+        print(f"   Diarização: {enable_diarization}")
+        
+        # Transcrever áudio com Whisper
+        result = whisper_model.transcribe(
+            str(temp_filepath),
+            language=language if language != "auto" else None,
+            word_timestamps=word_timestamps,
+            task="transcribe"
+        )
+        
+        transcribed_text = result["text"].strip()
+        detected_language = result.get("language", language)
+        segments = result.get("segments", [])
+        
+        # Calcular duração
+        duration = segments[-1]["end"] if segments else 0
+        
+        # Processar diarização se solicitado
+        speaker_segments = None
+        speakers_list = None
+        
+        if enable_diarization:
+            try:
+                # Usar pipeline já carregado (pré-carregado no startup)
+                diarization_pipeline = _diarization_pipeline
+                if not diarization_pipeline or not _DIARIZATION_READY:
+                    # Tentar carregar se não estiver carregado
+                    diarization_pipeline = load_diarization_pipeline()
+                
+                if diarization_pipeline and _DIARIZATION_READY:
+                    print(f"   🎤 Aplicando diarização...")
+                    
+                    # Executar diarização
+                    diarization = diarization_pipeline(str(temp_filepath))
+                    
+                    # Extrair speakers únicos
+                    speakers_set = set()
+                    for turn, _, speaker in diarization.itertracks(yield_label=True):
+                        speakers_set.add(speaker)
+                    speakers_list = sorted(list(speakers_set))
+                    
+                    # Combinar transcrição com diarização
+                    speaker_segments = []
+                    
+                    # Criar dicionário de timestamps por segmento do Whisper
+                    for segment in segments:
+                        seg_start = segment["start"]
+                        seg_end = segment["end"]
+                        seg_text = segment["text"].strip()
+                        
+                        # Encontrar qual speaker está falando neste segmento
+                        # Usar o speaker que tem mais overlap com o segmento
+                        best_speaker = None
+                        max_overlap = 0
+                        
+                        for turn, _, speaker in diarization.itertracks(yield_label=True):
+                            # Calcular overlap entre segmento e turno do speaker
+                            overlap_start = max(seg_start, turn.start)
+                            overlap_end = min(seg_end, turn.end)
+                            overlap = max(0, overlap_end - overlap_start)
+                            
+                            if overlap > max_overlap:
+                                max_overlap = overlap
+                                best_speaker = speaker
+                        
+                        # Se não encontrou speaker, usar o mais próximo
+                        if best_speaker is None and speakers_list:
+                            best_speaker = speakers_list[0]
+                        
+                        speaker_segments.append(SpeakerSegment(
+                            speaker=best_speaker or "SPEAKER_00",
+                            start=seg_start,
+                            end=seg_end,
+                            text=seg_text
+                        ))
+                    
+                    print(f"   ✅ Diarização concluída: {len(speakers_list)} speaker(s) identificado(s)")
+                else:
+                    print(f"   ⚠️ Diarização não disponível (token não configurado ou erro)")
+            except Exception as e:
+                print(f"   ⚠️ Erro na diarização: {e}")
+                # Continuar sem diarização
+        
+        # Limpar arquivo temporário
+        try:
+            if temp_filepath.exists():
+                temp_filepath.unlink()
+        except:
+            pass
+        
+        # Processar word timestamps se solicitado
+        word_timestamps_list = None
+        if word_timestamps and segments:
+            word_timestamps_list = []
+            for segment in segments:
+                words = segment.get("words", [])
+                for word_info in words:
+                    word_timestamps_list.append({
+                        "word": word_info.get("word", ""),
+                        "start": word_info.get("start", 0),
+                        "end": word_info.get("end", 0),
+                        "probability": word_info.get("probability", 0)
+                    })
+        
+        return TranscribeResponse(
+            success=True,
+            message="✅ Áudio transcrito com sucesso" + (" (com diarização)" if enable_diarization and speaker_segments else ""),
+            text=transcribed_text,
+            language=detected_language,
+            duration=round(duration, 2),
+            segments=speaker_segments,
+            speakers=speakers_list,
+            word_timestamps=word_timestamps_list
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Erro ao transcrever áudio: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erro ao transcrever áudio: {str(e)}"
+        )
 
 
 if __name__ == "__main__":

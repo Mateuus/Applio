@@ -11,7 +11,14 @@ API REST para geração de áudio usando Text-to-Speech (TTS) com Voice Conversi
 pip install -r requirements.txt
 ```
 
-2. Inicie a API:
+2. Configure as variáveis de ambiente (opcional):
+```bash
+# Crie um arquivo .env na pasta api/ (veja README_CONFIG.md para detalhes)
+# Ou use variáveis de ambiente diretamente
+export PYANNOTE_TOKEN=seu_token_huggingface  # Opcional, só para diarização
+```
+
+3. Inicie a API:
 ```bash
 # Usando o script
 ./start.sh
@@ -22,6 +29,15 @@ python app.py
 # Ou com uvicorn
 uvicorn app:app --host 0.0.0.0 --port 8000
 ```
+
+### ⚙️ Configuração
+
+Para mais detalhes sobre configuração, veja [README_CONFIG.md](./README_CONFIG.md).
+
+As principais configurações:
+- **Whisper**: Modelo de transcrição (padrão: `turbo`)
+- **Pyannote**: Token do Hugging Face para diarização (opcional)
+- **API**: Host e porta (padrão: `0.0.0.0:8000`)
 
 ### Acessar Documentação
 
@@ -38,8 +54,13 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 ### TTS (Text-to-Speech)
 
 - `GET /voices` - Lista todas as vozes TTS disponíveis (Edge TTS)
-- `POST /tts/inference` - Gera áudio usando TTS + RVC
+- `POST /tts/generate` - Gera áudio usando TTS + RVC (versão simplificada)
+- `POST /tts/inference` - Gera áudio usando TTS + RVC (versão completa)
 - `GET /tts/download/{filename}` - Download de arquivo de áudio gerado
+
+### Transcription (Transcrição)
+
+- `POST /transcribe` - Transcreve áudio usando Whisper V3 Turbo + Pyannote diarization
 
 ### RVC (Retrieval-Based Voice Conversion)
 
@@ -83,14 +104,24 @@ curl -X POST "http://localhost:8000/tts/inference" \
 ### Gerar Áudio e Receber em Base64
 
 ```bash
-curl -X POST "http://localhost:8000/tts/inference" \
+curl -X POST "http://localhost:8000/tts/generate" \
   -H "Content-Type: application/json" \
   -d '{
     "text": "Olá, este é um teste de síntese de voz.",
     "tts_voice": "pt-BR-FranciscaNeural",
     "model_path": "logs/modelo_exemplo/modelo.pth",
-    "return_base64": true
+    "output_format": "OGG"
   }'
+```
+
+### Transcrever Áudio com Diarização
+
+```bash
+curl -X POST "http://localhost:8000/transcribe" \
+  -F "file=@audio.mp3" \
+  -F "language=pt" \
+  -F "enable_diarization=true" \
+  -F "model_size=turbo"
 ```
 
 ## 🔧 Parâmetros de TTS Inference
@@ -184,12 +215,74 @@ export PORT=8000
 export RELOAD=true  # Para desenvolvimento
 ```
 
+## 🎤 Transcrição de Áudio
+
+### Endpoint `/transcribe`
+
+Transcreve áudio usando **Whisper V3 Turbo** (modelo mais moderno) com **Pyannote diarization** para identificar diferentes speakers.
+
+#### Parâmetros
+
+- `file` (obrigatório): Arquivo de áudio para transcrever
+- `language` (opcional): Idioma do áudio (pt, en, es, etc.) ou 'auto' para detecção automática (padrão: pt)
+- `enable_diarization` (opcional): Ativar diarização para identificar speakers (padrão: true)
+- `word_timestamps` (opcional): Incluir timestamps por palavra (padrão: false)
+- `model_size` (opcional): Tamanho do modelo Whisper - turbo, large-v3, large, medium, small, base, tiny (padrão: turbo)
+
+#### Formatos Suportados
+
+MP3, WAV, M4A, FLAC, OGG, WEBM, MP4, AAC
+
+#### Exemplo de Resposta
+
+```json
+{
+  "success": true,
+  "message": "✅ Áudio transcrito com sucesso (com diarização)",
+  "text": "Olá, este é um teste de transcrição com diarização.",
+  "language": "pt",
+  "duration": 5.2,
+  "speakers": ["SPEAKER_00", "SPEAKER_01"],
+  "segments": [
+    {
+      "speaker": "SPEAKER_00",
+      "start": 0.0,
+      "end": 2.5,
+      "text": "Olá, este é um teste"
+    },
+    {
+      "speaker": "SPEAKER_01",
+      "start": 2.5,
+      "end": 5.2,
+      "text": "de transcrição com diarização."
+    }
+  ]
+}
+```
+
+### Configuração do Pyannote
+
+Para usar diarização, você precisa de um token do Hugging Face:
+
+1. Crie uma conta no [Hugging Face](https://huggingface.co/)
+2. Aceite os termos do modelo [pyannote/speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1)
+3. Gere um token em [Settings > Access Tokens](https://huggingface.co/settings/tokens)
+3. Configure a variável de ambiente:
+
+```bash
+export PYANNOTE_TOKEN=seu_token_aqui
+```
+
+**Nota:** Se o token não estiver configurado, a transcrição funcionará normalmente, mas sem diarização.
+
 ## 📋 Requisitos
 
 - Python 3.8+
 - Applio instalado e configurado
 - Modelos RVC treinados (em `logs/`)
 - Dependências do Applio instaladas
+- Whisper V3 Turbo (instalado automaticamente via requirements.txt)
+- Pyannote.audio (instalado automaticamente via requirements.txt)
 
 ## 🛠️ Troubleshooting
 
