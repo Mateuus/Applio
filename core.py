@@ -410,6 +410,64 @@ def run_tts_script(
     )
 
 
+# TTS Only (sem RVC)
+def run_tts_only_script(
+    tts_file: str,
+    tts_text: str,
+    tts_voice: str,
+    tts_rate: int,
+    output_path: str,
+    export_format: str = "WAV",
+):
+    """
+    Gera áudio TTS apenas, sem aplicar RVC (Voice Conversion)
+    
+    Args:
+        tts_file: Caminho do arquivo de texto (pode ser vazio se tts_text for fornecido)
+        tts_text: Texto para sintetizar
+        tts_voice: Voz TTS (Edge TTS) - ShortName da voz
+        tts_rate: Taxa de velocidade TTS (-100 a 100)
+        output_path: Caminho de saída do áudio
+        export_format: Formato de exportação (WAV, MP3, FLAC, OGG, M4A)
+    
+    Returns:
+        Tupla (mensagem, caminho do arquivo gerado)
+    """
+    tts_script_path = os.path.join("rvc", "lib", "tools", "tts.py")
+
+    # Remover arquivo de saída se já existir
+    if os.path.exists(output_path) and os.path.abspath(output_path).startswith(
+        os.path.abspath("assets")
+    ):
+        os.remove(output_path)
+
+    # Gerar TTS usando o script
+    command_tts = [
+        *map(
+            str,
+            [
+                python,
+                tts_script_path,
+                tts_file,
+                tts_text,
+                tts_voice,
+                tts_rate,
+                output_path,
+            ],
+        ),
+    ]
+    subprocess.run(command_tts)
+
+    # Se o formato de saída não for WAV, converter
+    if export_format.upper() != "WAV" and os.path.exists(output_path):
+        # Converter usando ffmpeg ou similar se necessário
+        # Por enquanto, o TTS sempre gera WAV, então retornamos o WAV
+        # A conversão pode ser feita na API se necessário
+        pass
+
+    return f"Text {tts_text} synthesized successfully (TTS only).", output_path
+
+
 # Preprocess
 def run_preprocess_script(
     model_name: str,

@@ -13,8 +13,9 @@ from pathlib import Path
 from datetime import datetime
 from contextlib import asynccontextmanager
 from typing import Optional, List
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, Header
 from fastapi.responses import FileResponse
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
 import uvicorn
 
@@ -29,7 +30,7 @@ sys.path.insert(0, now_dir)
 from api.config import settings, print_config_summary
 
 # Importar funções do Applio
-from core import run_tts_script, load_voices_data
+from core import run_tts_script, run_tts_only_script, load_voices_data
 from tabs.inference.inference import get_files, match_index, get_speakers_id
 from rvc.configs.config import Config, get_gpu_info
 import torch
@@ -46,6 +47,82 @@ _whisper_model = None
 _WHISPER_READY = False
 _diarization_pipeline = None
 _DIARIZATION_READY = False
+_models_config = None
+
+
+def load_models_config():
+    """Carrega configuração de modelos (mapeamento ID -> model_path)"""
+    global _models_config
+    if _models_config is None:
+        config_path = os.path.join(os.path.dirname(__file__), "config", "models_config.json")
+        try:
+            if os.path.exists(config_path):
+                with open(config_path, "r", encoding="utf-8") as f:
+                    _models_config = json.load(f)
+            else:
+                # Criar arquivo padrão se não existir
+                os.makedirs(os.path.dirname(config_path), exist_ok=True)
+                _models_config = {"models": []}
+                with open(config_path, "w", encoding="utf-8") as f:
+                    json.dump(_models_config, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            print(f"⚠️ Erro ao carregar models_config.json: {e}")
+            _models_config = {"models": []}
+    return _models_config
+
+
+def get_model_by_id(model_id: str) -> Optional[dict]:
+    """
+    Busca modelo por ID no arquivo de configuração
+    
+    Args:
+        model_id: ID do modelo (ex: "operario6532df")
+    
+    Returns:
+        Dicionário com informações do modelo ou None se não encontrado
+    """
+    config = load_models_config()
+    for model in config.get("models", []):
+        if model.get("id") == model_id:
+            return model
+    return None
+
+
+def resolve_model_path(model_path_or_id: str) -> tuple[Optional[str], Optional[str], Optional[dict]]:
+    """
+    Resolve model_path que pode ser um ID ou caminho completo
+    
+    Args:
+        model_path_or_id: ID do modelo (ex: "16c19771-9ece-45fd-8ce5-53bb5263a63d") ou caminho completo (ex: "logs/Lula/Lula.pth")
+    
+    Returns:
+        Tupla (model_path, index_path, model_info)
+        - model_path: Caminho completo do modelo .pth
+        - index_path: Caminho do arquivo index (do config se disponível, senão auto-detectado)
+        - model_info: Informações do modelo do config (None se não estiver no config)
+    """
+    # Primeiro, tentar buscar por ID no config
+    model_info = get_model_by_id(model_path_or_id)
+    
+    if model_info:
+        # Encontrou no config, usar o model_path e model_index do config
+        model_path = model_info.get("model_path")
+        if model_path and os.path.exists(model_path):
+            # Usar model_index do config se disponível, senão auto-detectar
+            index_path = model_info.get("model_index")
+            if not index_path or not os.path.exists(index_path):
+                # Se não tem no config ou não existe, auto-detectar
+                index_path = match_index(model_path)
+            return model_path, index_path, model_info
+    
+    # Se não encontrou no config ou não existe, verificar se é um caminho válido
+    if os.path.exists(model_path_or_id):
+        # É um caminho válido
+        index_path = match_index(model_path_or_id)
+        return model_path_or_id, index_path, None
+    
+    # Não encontrou nem no config nem como caminho
+    return None, None, None
 
 
 def load_tts_voices():
@@ -154,6 +231,7 @@ async def lifespan(app_instance: FastAPI):
     print_config_summary()
     
     load_tts_voices()
+    load_models_config()  # Carregar configuração de modelos
     
     # Pré-carregar Whisper no startup se configurado
     if settings.WHISPER_PRELOAD:
@@ -197,6 +275,33 @@ app = FastAPI(
     redoc_url="/redoc"
 )
 
+# Security
+security = HTTPBearer(auto_error=False)
+
+
+def verify_api_key(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    """
+    Verifica a API key se estiver configurada
+    Se API_KEY não estiver configurada, permite acesso público
+    """
+    if not settings.has_api_key:
+        # API pública - não requer autenticação
+        return True
+    
+    if not credentials:
+        raise HTTPException(
+            status_code=401,
+            detail="API key requerida. Use: Authorization: Bearer <api_key>"
+        )
+    
+    if credentials.credentials != settings.API_KEY:
+        raise HTTPException(
+            status_code=403,
+            detail="API key inválida"
+        )
+    
+    return True
+
 
 # ==================== Models Pydantic ====================
 
@@ -212,12 +317,27 @@ def clean_text(text: str) -> str:
     return cleaned.strip()
 
 
+class GenerateRequest(BaseModel):
+    """Request model para endpoint /generate - TTS com ou sem RVC"""
+    text: str = Field(..., description="Texto para sintetizar", min_length=1, max_length=5000)
+    tts_voice: str = Field(..., description="Voz TTS (Edge TTS) - ShortName da voz (ex: pt-BR-FranciscaNeural). Use /voices para listar")
+    model_id: Optional[str] = Field(None, description="ID do modelo (ex: '16c19771-9ece-45fd-8ce5-53bb5263a63d') ou caminho completo (ex: 'logs/Lula/Lula.pth'). Se não fornecido, gera apenas TTS sem RVC. Use /models para listar IDs e caminhos disponíveis. O index será obtido automaticamente do config ou auto-detectado")
+    tts_rate: int = Field(0, description="Taxa de velocidade TTS (-100 a 100)", ge=-100, le=100)
+    output_format: str = Field("WAV", description="Formato de saída (WAV, MP3, FLAC, OGG, M4A)")
+    
+    @classmethod
+    def validate_text(cls, v):
+        """Valida e limpa o texto"""
+        if isinstance(v, str):
+            return clean_text(v)
+        return v
+
+
 class SimpleTTSRequest(BaseModel):
     """Request model simplificado para TTS - similar à interface do Applio"""
     text: str = Field(..., description="Texto para sintetizar", min_length=1, max_length=5000)
     tts_voice: str = Field(..., description="Voz TTS (Edge TTS) - ShortName da voz (ex: pt-BR-FranciscaNeural)")
-    model_path: str = Field(..., description="Caminho do modelo RVC (.pth) - ex: logs/Lula/Lula.pth")
-    index_path: Optional[str] = Field(None, description="Caminho do arquivo index (.index). Se não fornecido, será auto-detectado")
+    model_id: str = Field(..., description="ID do modelo (ex: '16c19771-9ece-45fd-8ce5-53bb5263a63d') ou caminho completo (ex: 'logs/Lula/Lula.pth'). Use /models para listar IDs e caminhos disponíveis. O index será obtido automaticamente do config ou auto-detectado")
     tts_rate: int = Field(0, description="Taxa de velocidade TTS (-100 a 100)", ge=-100, le=100)
     return_base64: bool = Field(True, description="Retornar áudio em base64 (padrão: true - sempre retorna base64)")
     output_format: str = Field("OGG", description="Formato de saída quando return_base64=true (WAV, MP3, FLAC, OGG, M4A). Padrão: OGG para R2")
@@ -234,8 +354,7 @@ class TTSInferenceRequest(BaseModel):
     """Request model completo para TTS Inference com todas as opções avançadas"""
     text: str = Field(..., description="Texto para sintetizar", min_length=1, max_length=5000)
     tts_voice: str = Field(..., description="Voz TTS (Edge TTS) - ShortName da voz")
-    model_path: str = Field(..., description="Caminho do modelo RVC (.pth)")
-    index_path: Optional[str] = Field(None, description="Caminho do arquivo index (.index). Se não fornecido, será auto-detectado")
+    model_id: str = Field(..., description="ID do modelo (ex: '16c19771-9ece-45fd-8ce5-53bb5263a63d') ou caminho completo (ex: 'logs/Lula/Lula.pth'). Use /models para listar IDs e caminhos disponíveis. O index será obtido automaticamente do config ou auto-detectado")
     
     # Parâmetros TTS
     tts_rate: int = Field(0, description="Taxa de velocidade TTS (-100 a 100)", ge=-100, le=100)
@@ -271,8 +390,8 @@ class TTSInferenceResponse(BaseModel):
     message: str
     text: str
     tts_voice: str
-    model_path: str
-    index_path: Optional[str]
+    model_path: Optional[str] = None  # Opcional quando não há modelo RVC
+    index_path: Optional[str] = None
     output_file: Optional[str] = None
     output_path: Optional[str] = None
     base64: Optional[str] = None  # Sempre presente quando return_base64=true (endpoint /tts/generate)
@@ -300,9 +419,11 @@ class VoicesListResponse(BaseModel):
 
 class ModelInfo(BaseModel):
     """Informações sobre um modelo RVC"""
+    id: Optional[str] = None  # ID do modelo (se estiver no config)
     path: str
     name: str
     index_path: Optional[str] = None
+    description: Optional[str] = None  # Descrição do modelo (se estiver no config)
 
 
 class ModelsListResponse(BaseModel):
@@ -416,7 +537,7 @@ async def gpu_status():
 
 
 @app.get("/voices", response_model=VoicesListResponse, tags=["TTS"])
-async def list_voices(language: Optional[str] = None):
+async def list_voices(language: Optional[str] = None, _: bool = Depends(verify_api_key)):
     """
     Lista todas as vozes TTS disponíveis (Edge TTS)
     
@@ -463,27 +584,56 @@ async def list_voices(language: Optional[str] = None):
 
 
 @app.get("/models", response_model=ModelsListResponse, tags=["RVC"])
-async def list_models():
+async def list_models(_: bool = Depends(verify_api_key)):
     """
     Lista todos os modelos RVC disponíveis
     
+    Retorna modelos de duas fontes:
+    1. Modelos configurados em models_config.json (com ID)
+    2. Modelos encontrados no sistema de arquivos (sem ID)
+    
     Returns:
-        Lista de modelos RVC com seus respectivos index files
+        Lista de modelos RVC com seus respectivos index files e IDs (se disponíveis)
     """
     try:
+        # Carregar modelos do config
+        config = load_models_config()
+        config_models = {m.get("model_path"): m for m in config.get("models", [])}
+        
+        # Buscar modelos no sistema de arquivos
         models = get_files("model")
-        indexes = get_files("index")
         
         models_list = []
+        processed_paths = set()
+        
+        # Primeiro, adicionar modelos do config (com ID)
+        for model_info in config.get("models", []):
+            model_path = model_info.get("model_path")
+            if model_path and os.path.exists(model_path):
+                # Usar model_index do config se disponível, senão auto-detectar
+                index_path = model_info.get("model_index")
+                if not index_path or not os.path.exists(index_path):
+                    index_path = match_index(model_path)
+                models_list.append(ModelInfo(
+                    id=model_info.get("id"),
+                    path=model_path,
+                    name=model_info.get("name", os.path.basename(model_path)),
+                    index_path=index_path,
+                    description=model_info.get("description")
+                ))
+                processed_paths.add(model_path)
+        
+        # Depois, adicionar modelos não configurados (sem ID)
         for model_path in models:
-            # Tentar encontrar index correspondente
-            index_path = match_index(model_path)
-            
-            models_list.append(ModelInfo(
-                path=model_path,
-                name=os.path.basename(model_path),
-                index_path=index_path
-            ))
+            if model_path not in processed_paths:
+                index_path = match_index(model_path)
+                models_list.append(ModelInfo(
+                    id=None,
+                    path=model_path,
+                    name=os.path.basename(model_path),
+                    index_path=index_path,
+                    description=None
+                ))
         
         return ModelsListResponse(
             success=True,
@@ -498,28 +648,29 @@ async def list_models():
 
 
 @app.get("/models/{model_path:path}/index", response_model=ModelIndexResponse, tags=["RVC"])
-async def get_model_index(model_path: str):
+async def get_model_index(model_path: str, _: bool = Depends(verify_api_key)):
     """
     Obtém o arquivo index correspondente a um modelo RVC
     
     Args:
-        model_path: Caminho do modelo RVC (ex: logs/Lula/Lula.pth)
+        model_path: ID do modelo (ex: '16c19771-9ece-45fd-8ce5-53bb5263a63d') ou caminho completo (ex: logs/Lula/Lula.pth)
     
     Returns:
         Caminho do arquivo index correspondente
     """
     try:
-        if not os.path.exists(model_path):
+        # Resolver model_path (pode ser ID ou caminho completo)
+        resolved_model_path, index_path, _ = resolve_model_path(model_path)
+        
+        if not resolved_model_path:
             raise HTTPException(
                 status_code=404,
-                detail=f"Modelo não encontrado: {model_path}"
+                detail=f"Modelo não encontrado: {model_path}. Use /models para listar IDs e caminhos disponíveis."
             )
-        
-        index_path = match_index(model_path)
         
         return ModelIndexResponse(
             success=True,
-            model_path=model_path,
+            model_path=resolved_model_path,
             index_path=index_path,
             message=f"Index file encontrado: {index_path}" if index_path else "Nenhum index file encontrado para este modelo"
         )
@@ -533,28 +684,31 @@ async def get_model_index(model_path: str):
 
 
 @app.get("/models/{model_path:path}/speakers", response_model=SpeakerIDsResponse, tags=["RVC"])
-async def get_model_speakers(model_path: str):
+async def get_model_speakers(model_path: str, _: bool = Depends(verify_api_key)):
     """
     Obtém os Speaker IDs disponíveis para um modelo RVC
     
     Args:
-        model_path: Caminho do modelo RVC (ex: logs/Lula/Lula.pth)
+        model_path: ID do modelo (ex: '16c19771-9ece-45fd-8ce5-53bb5263a63d') ou caminho completo (ex: logs/Lula/Lula.pth)
     
     Returns:
         Lista de Speaker IDs disponíveis
     """
     try:
-        if not os.path.exists(model_path):
+        # Resolver model_path (pode ser ID ou caminho completo)
+        resolved_model_path, _, _ = resolve_model_path(model_path)
+        
+        if not resolved_model_path:
             raise HTTPException(
                 status_code=404,
-                detail=f"Modelo não encontrado: {model_path}"
+                detail=f"Modelo não encontrado: {model_path}. Use /models para listar IDs e caminhos disponíveis."
             )
         
-        speaker_ids = get_speakers_id(model_path)
+        speaker_ids = get_speakers_id(resolved_model_path)
         
         return SpeakerIDsResponse(
             success=True,
-            model_path=model_path,
+            model_path=resolved_model_path,
             speaker_ids=speaker_ids,
             total=len(speaker_ids)
         )
@@ -567,8 +721,274 @@ async def get_model_speakers(model_path: str):
         )
 
 
+@app.post("/generate", response_model=TTSInferenceResponse, tags=["TTS"])
+async def generate(request: GenerateRequest, _: bool = Depends(verify_api_key)):
+    """
+    Gera áudio TTS com ou sem modelo RVC
+    
+    Este endpoint permite gerar áudio de duas formas:
+    1. **Apenas TTS** (sem modelo RVC): Se `model_id` não for fornecido, gera apenas o áudio TTS usando Edge TTS
+    2. **TTS + RVC**: Se `model_id` for fornecido, gera TTS e aplica Voice Conversion usando o modelo RVC
+    
+    Parâmetros obrigatórios:
+    - text: Texto para sintetizar
+    - tts_voice: Voz TTS (Edge TTS) - ShortName da voz (use /voices para listar)
+    
+    Parâmetros opcionais:
+    - model_id: ID do modelo (ex: '16c19771-9ece-45fd-8ce5-53bb5263a63d') ou caminho completo (ex: 'logs/Lula/Lula.pth') - se não fornecido, gera apenas TTS sem RVC (use /models para listar IDs e caminhos). O index será obtido automaticamente do config ou auto-detectado
+    - tts_rate: Velocidade TTS (-100 a 100, padrão: 0)
+    - output_format: Formato de saída (WAV, MP3, FLAC, OGG, M4A, padrão: WAV)
+    
+    Returns:
+        TTSInferenceResponse com áudio em base64
+    """
+    try:
+        # Limpar texto de caracteres de controle
+        cleaned_text = clean_text(request.text)
+        if not cleaned_text:
+            raise HTTPException(
+                status_code=400,
+                detail="Texto inválido ou vazio após limpeza"
+            )
+        
+        # Validar formato de saída
+        valid_formats = ["WAV", "MP3", "FLAC", "OGG", "M4A"]
+        output_format = request.output_format.upper()
+        if output_format not in valid_formats:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Formato inválido: {output_format}. Formatos válidos: {', '.join(valid_formats)}"
+            )
+        
+        # Validar voz TTS
+        voices_data = load_tts_voices()
+        voice_names = [v.get("ShortName", "") for v in voices_data]
+        if request.tts_voice not in voice_names:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Voz TTS não encontrada: {request.tts_voice}. Use /voices para listar vozes disponíveis."
+            )
+        
+        # Criar arquivos temporários
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Se não há modelo, gerar apenas TTS
+        if not request.model_id or request.model_id.strip() == "":
+            # Gerar apenas TTS sem RVC
+            output_filename = f"tts_only_{timestamp}.{output_format.lower()}"
+            output_path = os.path.join(OUTPUT_DIR, output_filename)
+            
+            # Ajustar caminho para WAV (TTS sempre gera WAV)
+            tts_output_path = output_path.replace(f".{output_format.lower()}", ".wav")
+            
+            print(f"\n🎤 Gerando TTS apenas (sem RVC)...")
+            print(f"   Texto: {cleaned_text[:50]}...")
+            print(f"   Voz TTS: {request.tts_voice}")
+            print(f"   Formato: {output_format}")
+            
+            # Gerar TTS
+            try:
+                message, output_file = run_tts_only_script(
+                    tts_file="",
+                    tts_text=cleaned_text,
+                    tts_voice=request.tts_voice,
+                    tts_rate=request.tts_rate,
+                    output_path=tts_output_path,
+                    export_format=output_format,
+                )
+            except Exception as e:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Erro ao gerar TTS: {str(e)}"
+                )
+            
+            # Verificar se arquivo foi criado
+            if not os.path.exists(output_file):
+                raise HTTPException(
+                    status_code=500,
+                    detail="Erro ao gerar áudio: arquivo não foi criado"
+                )
+            
+            # Converter formato se necessário (TTS sempre gera WAV)
+            final_output = output_file
+            if output_format.upper() != "WAV":
+                # Por enquanto, retornamos WAV mesmo se outro formato foi solicitado
+                # A conversão pode ser adicionada depois se necessário
+                final_output = output_file
+            
+            # Obter informações do arquivo
+            file_size = os.path.getsize(final_output)
+            size_kb = file_size / 1024
+            
+            # Tentar obter duração
+            duration_seconds = None
+            try:
+                import librosa
+                duration_seconds = librosa.get_duration(path=final_output)
+            except:
+                pass
+            
+            # Converter para base64
+            base64_audio = None
+            with open(final_output, "rb") as audio_file:
+                audio_bytes = audio_file.read()
+                base64_audio = base64.b64encode(audio_bytes).decode('utf-8')
+            
+            # Limpar arquivo
+            try:
+                os.remove(final_output)
+            except:
+                pass
+            
+            return TTSInferenceResponse(
+                success=True,
+                message=message or "✅ Áudio TTS gerado com sucesso (sem RVC)",
+                text=cleaned_text,
+                tts_voice=request.tts_voice,
+                model_path=None,
+                index_path=None,
+                output_file=None,
+                output_path=None,
+                base64=base64_audio,
+                format="WAV",  # TTS sempre gera WAV
+                size_kb=size_kb,
+                duration_seconds=duration_seconds
+            )
+        
+        else:
+            # Resolver model_id (pode ser ID ou caminho completo)
+            resolved_model_path, auto_index_path, model_info = resolve_model_path(request.model_id)
+            
+            if not resolved_model_path:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Modelo não encontrado: {request.model_id}. Use /models para listar IDs e caminhos disponíveis."
+                )
+            
+            # Usar index_path auto-detectado (do config ou match_index)
+            index_path = auto_index_path
+            
+            if index_path and not os.path.exists(index_path):
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Arquivo index não encontrado: {index_path}"
+                )
+            
+            # Usar o caminho resolvido
+            actual_model_path = resolved_model_path
+            
+            # Gerar TTS + RVC
+            tts_output_path = os.path.join(OUTPUT_DIR, f"tts_output_{timestamp}.wav")
+            rvc_output_filename = f"tts_rvc_output_{timestamp}.{output_format.lower()}"
+            rvc_output_path = os.path.join(OUTPUT_DIR, rvc_output_filename)
+            
+            config = Config()
+            device_info = f" ({config.gpu_name})" if config.gpu_name else ""
+            
+            print(f"\n🎤 Gerando TTS + RVC...")
+            print(f"   Device: {config.device}{device_info}")
+            print(f"   Texto: {cleaned_text[:50]}...")
+            print(f"   Voz TTS: {request.tts_voice}")
+            print(f"   Modelo RVC: {actual_model_path}" + (f" (ID: {request.model_id})" if model_info else ""))
+            print(f"   Index: {index_path}")
+            print(f"   Formato: {output_format}")
+            
+            # Chamar função do Applio para TTS + RVC
+            try:
+                message, output_file = run_tts_script(
+                    tts_file="",
+                    tts_text=cleaned_text,
+                    tts_voice=request.tts_voice,
+                    tts_rate=request.tts_rate,
+                    pitch=0,
+                    index_rate=0.75,
+                    volume_envelope=1.0,
+                    protect=0.5,
+                    f0_method="rmvpe",
+                    output_tts_path=tts_output_path,
+                    output_rvc_path=rvc_output_path,
+                    pth_path=actual_model_path,
+                    index_path=index_path or "",
+                    split_audio=False,
+                    f0_autotune=False,
+                    f0_autotune_strength=1.0,
+                    proposed_pitch=False,
+                    proposed_pitch_threshold=155.0,
+                    clean_audio=False,
+                    clean_strength=0.5,
+                    export_format=output_format,
+                    embedder_model="contentvec",
+                    embedder_model_custom=None,
+                    sid=0,
+                )
+            except Exception as e:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Erro ao gerar TTS + RVC: {str(e)}"
+                )
+            
+            # Verificar se arquivo foi criado
+            if not os.path.exists(output_file):
+                raise HTTPException(
+                    status_code=500,
+                    detail="Erro ao gerar áudio: arquivo não foi criado"
+                )
+            
+            # Obter informações do arquivo
+            file_size = os.path.getsize(output_file)
+            size_kb = file_size / 1024
+            
+            # Tentar obter duração
+            duration_seconds = None
+            try:
+                import librosa
+                duration_seconds = librosa.get_duration(path=output_file)
+            except:
+                pass
+            
+            # Converter para base64
+            base64_audio = None
+            with open(output_file, "rb") as audio_file:
+                audio_bytes = audio_file.read()
+                base64_audio = base64.b64encode(audio_bytes).decode('utf-8')
+            
+            # Limpar arquivos
+            try:
+                os.remove(output_file)
+                if os.path.exists(tts_output_path):
+                    os.remove(tts_output_path)
+            except:
+                pass
+            
+            return TTSInferenceResponse(
+                success=True,
+                message=message or "✅ Áudio TTS + RVC gerado com sucesso",
+                text=cleaned_text,
+                tts_voice=request.tts_voice,
+                model_path=actual_model_path,  # Retornar caminho resolvido
+                index_path=index_path,
+                output_file=None,
+                output_path=None,
+                base64=base64_audio,
+                format=output_format.upper(),
+                size_kb=size_kb,
+                duration_seconds=duration_seconds
+            )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Erro ao gerar áudio: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erro ao gerar áudio: {str(e)}"
+        )
+
+
 @app.post("/tts/generate", response_model=TTSInferenceResponse, tags=["TTS"])
-async def tts_generate_simple(request: SimpleTTSRequest):
+async def tts_generate_simple(request: SimpleTTSRequest, _: bool = Depends(verify_api_key)):
     """
     Gera áudio TTS de forma simplificada - similar à interface do Applio
     
@@ -578,7 +998,7 @@ async def tts_generate_simple(request: SimpleTTSRequest):
     Parâmetros obrigatórios:
     - text: Texto para sintetizar
     - tts_voice: Voz TTS (use /voices para listar)
-    - model_path: Caminho do modelo RVC (use /models para listar)
+    - model_id: ID do modelo (ex: '16c19771-9ece-45fd-8ce5-53bb5263a63d') ou caminho completo (ex: 'logs/Lula/Lula.pth') - use /models para listar IDs e caminhos
     
     Parâmetros opcionais:
     - index_path: Auto-detectado se não fornecido
@@ -616,8 +1036,7 @@ async def tts_generate_simple(request: SimpleTTSRequest):
     full_request = TTSInferenceRequest(
         text=cleaned_text,  # Usar texto limpo
         tts_voice=request.tts_voice,
-        model_path=request.model_path,
-        index_path=request.index_path,
+        model_id=request.model_id,
         tts_rate=request.tts_rate,
         pitch=0,
         index_rate=0.75,
@@ -643,7 +1062,7 @@ async def tts_generate_simple(request: SimpleTTSRequest):
 
 
 @app.post("/tts/inference", response_model=TTSInferenceResponse, tags=["TTS"])
-async def tts_inference(request: TTSInferenceRequest):
+async def tts_inference(request: TTSInferenceRequest, _: bool = Depends(verify_api_key)):
     """
     Gera áudio usando TTS + RVC (Voice Conversion) - Versão completa com todas as opções
     
@@ -659,22 +1078,26 @@ async def tts_inference(request: TTSInferenceRequest):
         TTSInferenceResponse com informações do áudio gerado
     """
     try:
-        # Validar modelo
-        if not os.path.exists(request.model_path):
+        # Resolver model_id (pode ser ID ou caminho completo)
+        resolved_model_path, auto_index_path, model_info = resolve_model_path(request.model_id)
+        
+        if not resolved_model_path:
             raise HTTPException(
                 status_code=404,
-                detail=f"Modelo não encontrado: {request.model_path}"
+                detail=f"Modelo não encontrado: {request.model_id}. Use /models para listar IDs e caminhos disponíveis."
             )
         
-        # Validar ou auto-detectar index
-        if not request.index_path:
-            request.index_path = match_index(request.model_path)
+        # Usar index_path auto-detectado (do config ou match_index)
+        actual_index_path = auto_index_path
         
-        if request.index_path and not os.path.exists(request.index_path):
+        if actual_index_path and not os.path.exists(actual_index_path):
             raise HTTPException(
                 status_code=404,
-                detail=f"Arquivo index não encontrado: {request.index_path}"
+                detail=f"Arquivo index não encontrado: {actual_index_path}"
             )
+        
+        # Usar o caminho resolvido
+        actual_model_path = resolved_model_path
         
         # Validar voz TTS
         voices_data = load_tts_voices()
@@ -722,8 +1145,8 @@ async def tts_inference(request: TTSInferenceRequest):
         print(f"   Device: {config.device}{device_info}")
         print(f"   Texto: {request.text[:50]}...")
         print(f"   Voz TTS: {request.tts_voice}")
-        print(f"   Modelo RVC: {request.model_path}")
-        print(f"   Index: {request.index_path}")
+        print(f"   Modelo RVC: {actual_model_path}" + (f" (ID: {request.model_id})" if model_info else ""))
+        print(f"   Index: {actual_index_path}")
         
         # Chamar função do Applio
         try:
@@ -739,8 +1162,8 @@ async def tts_inference(request: TTSInferenceRequest):
                 f0_method=request.f0_method,
                 output_tts_path=tts_output_path,
                 output_rvc_path=rvc_output_path,
-                pth_path=request.model_path,
-                index_path=request.index_path or "",
+                pth_path=actual_model_path,
+                index_path=actual_index_path or "",
                 split_audio=request.split_audio,
                 f0_autotune=request.f0_autotune,
                 f0_autotune_strength=request.f0_autotune_strength,
@@ -804,8 +1227,8 @@ async def tts_inference(request: TTSInferenceRequest):
             message=message or "✅ Áudio gerado com sucesso",
             text=request.text,
             tts_voice=request.tts_voice,
-            model_path=request.model_path,
-            index_path=request.index_path,
+            model_path=actual_model_path,  # Retornar caminho resolvido
+            index_path=actual_index_path,
             output_file=os.path.basename(output_file) if output_file else None,
             output_path=output_file if output_file and not request.return_base64 else None,
             base64=base64_audio,
@@ -827,7 +1250,7 @@ async def tts_inference(request: TTSInferenceRequest):
 
 
 @app.get("/tts/download/{filename}", tags=["TTS"])
-async def download_audio(filename: str):
+async def download_audio(filename: str, _: bool = Depends(verify_api_key)):
     """
     Download de arquivo de áudio gerado
     
@@ -858,7 +1281,8 @@ async def transcribe_audio(
     language: Optional[str] = "pt",
     enable_diarization: bool = True,
     word_timestamps: bool = False,
-    model_size: str = "turbo"
+    model_size: str = "turbo",
+    _: bool = Depends(verify_api_key)
 ):
     """
     Transcrever áudio usando Whisper V3 Turbo com diarização Pyannote

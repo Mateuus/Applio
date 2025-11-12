@@ -1,0 +1,40 @@
+{
+  "models": [
+    {
+        "id": "16c19771-9ece-45fd-8ce5-53bb5263a63d",
+        "model_path": "logs/Lula/Lula.pth",
+        "model_index": "logs/Lula/Lula.index",
+        "name": "Operario",
+        "description": "Modelo de voz do Operario"
+    },
+    {
+        "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        "model_path": "logs/Bolsonaro/Bolsonaro.pth",
+        "model_index": "logs/Bolsonaro/Bolsonaro.index",
+        "name": "Capitão",
+        "description": "Modelo de voz do Capitão"
+    },
+    {
+        "id": "4d18e424-ae37-4871-891b-adcec0fd961b",
+        "path": "logs/baby/baby.pth",
+        "name": "baby.pth",
+        "index_path": "logs/baby/baby.index",
+        "description": "Modelo de voz do baby"
+    },
+    {
+        "id": "c55931f8-de74-4c80-a1c2-15a31ed185b9",
+        "path": "logs/NeymarJR/NeymarJR.pth",
+        "name": "NeymarJR.pth",
+        "index_path": "logs/IVF528_Flat_NeymarJR/added_IVF528_Flat_nprobe_1_NeymarJR_v2.index",
+        "description": "Modelo de voz do NeymarJR"
+    },
+    {
+        "id": "67928562-294f-482e-8d84-85b359143122",
+        "path": "logs/SilvioSantos/SilvioSantos.pth",
+        "name": "SilvioSantos.pth",
+        "index_path": "logs/IVF386_Flat_SilvioSantos/added_IVF386_Flat_nprobe_1_SilvioSantos_v2.index",
+        "description": "Modelo de voz do SilvioSantos"
+    }
+  ]
+}
+

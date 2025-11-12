@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     API_PORT: int = 8000
     API_TITLE: str = "🎤 Applio TTS Inference API"
     API_VERSION: str = "1.0.0"
+    API_KEY: Optional[str] = None  # API key para autenticação (Bearer token)
     
     # ============================================
     # Whisper (Transcription)
@@ -83,6 +84,11 @@ class Settings(BaseSettings):
     def should_preload_diarization(self) -> bool:
         """Verifica se deve pré-carregar diarização"""
         return self.PYANNOTE_PRELOAD and self.has_pyannote_token
+    
+    @property
+    def has_api_key(self) -> bool:
+        """Verifica se a API key está configurada"""
+        return self.API_KEY is not None and self.API_KEY.strip() != ""
 
 
 # Instância global de configurações
@@ -98,6 +104,7 @@ def print_config_summary():
     print(f"   Whisper Preload: {settings.WHISPER_PRELOAD}")
     print(f"   Pyannote Token: {'✅ Configurado' if settings.has_pyannote_token else '❌ Não configurado (configure PYANNOTE_TOKEN no .env)'}")
     print(f"   Pyannote Preload: {settings.should_preload_diarization}")
+    print(f"   API Key: {'✅ Configurado' if settings.has_api_key else '❌ Não configurado (API pública)'}")
     print(f"   Output Dir: {settings.OUTPUT_DIR}")
     print(f"   Upload Dir: {settings.UPLOAD_DIR}")
     print()
