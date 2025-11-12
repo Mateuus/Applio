@@ -1467,6 +1467,208 @@ async def transcribe_audio(
         )
 
 
+class MergeAudioRequest(BaseModel):
+    """Request model para mesclar TTS do título com áudio do usuário"""
+    title_text: str = Field(..., description="Texto do título para gerar TTS (ex: 'Mateuus mandou R$ 10,00')", min_length=1, max_length=200)
+    tts_voice: str = Field(..., description="Voz TTS (Edge TTS) - ShortName da voz (ex: pt-BR-AntonioNeural)")
+    user_audio_base64: str = Field(..., description="Áudio do usuário em base64")
+    output_format: str = Field("OGG", description="Formato de saída (WAV, MP3, FLAC, OGG, M4A). Padrão: OGG")
+
+
+class MergeAudioResponse(BaseModel):
+    """Response model para áudio mesclado"""
+    success: bool
+    message: str
+    base64: str  # Áudio mesclado em base64
+    format: str  # Formato do áudio (OGG, WAV, etc)
+    duration_seconds: float  # Duração total do áudio mesclado em segundos
+    size_kb: float  # Tamanho do áudio em KB
+
+
+@app.post("/merge-audio", response_model=MergeAudioResponse, tags=["TTS"])
+async def merge_audio_with_title(
+    request: MergeAudioRequest,
+    _: bool = Depends(verify_api_key)
+):
+    """
+    Mescla TTS do título com áudio do usuário
+    
+    Este endpoint:
+    1. Gera TTS do título usando Edge TTS
+    2. Decodifica o áudio do usuário (base64)
+    3. Mescla os dois áudios (concatena)
+    4. Retorna o áudio mesclado em base64 com duração
+    
+    Args:
+        request: MergeAudioRequest com título, voz TTS e áudio do usuário
+    
+    Returns:
+        MergeAudioResponse com áudio mesclado em base64 e duração
+    """
+    try:
+        import librosa
+        import soundfile as sf
+        import numpy as np
+        
+        # Limpar texto do título
+        cleaned_title = clean_text(request.title_text)
+        if not cleaned_title:
+            raise HTTPException(
+                status_code=400,
+                detail="Texto do título inválido ou vazio após limpeza"
+            )
+        
+        # Validar formato de saída
+        valid_formats = ["WAV", "MP3", "FLAC", "OGG", "M4A"]
+        output_format = request.output_format.upper()
+        if output_format not in valid_formats:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Formato inválido: {output_format}. Formatos válidos: {', '.join(valid_formats)}"
+            )
+        
+        # Validar voz TTS
+        voices_data = load_tts_voices()
+        voice_names = [v.get("ShortName", "") for v in voices_data]
+        if request.tts_voice not in voice_names:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Voz TTS não encontrada: {request.tts_voice}. Use /voices para listar vozes disponíveis."
+            )
+        
+        print(f"\n🎤 Mesclando áudio com título...")
+        print(f"   Título: {cleaned_title}")
+        print(f"   Voz TTS: {request.tts_voice}")
+        print(f"   Formato: {output_format}")
+        
+        # 1. Gerar TTS do título
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        tts_output_path = os.path.join(OUTPUT_DIR, f"tts_title_{timestamp}.wav")
+        
+        try:
+            message, tts_file = run_tts_only_script(
+                tts_file="",
+                tts_text=cleaned_title,
+                tts_voice=request.tts_voice,
+                tts_rate=0,
+                output_path=tts_output_path,
+                export_format="WAV",
+            )
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Erro ao gerar TTS do título: {str(e)}"
+            )
+        
+        if not os.path.exists(tts_output_path):
+            raise HTTPException(
+                status_code=500,
+                detail="Erro ao gerar TTS: arquivo não foi criado"
+            )
+        
+        # 2. Decodificar áudio do usuário (base64)
+        try:
+            user_audio_bytes = base64.b64decode(request.user_audio_base64)
+            user_audio_temp = os.path.join(UPLOAD_DIR, f"user_audio_{timestamp}.tmp")
+            with open(user_audio_temp, "wb") as f:
+                f.write(user_audio_bytes)
+        except Exception as e:
+            # Limpar arquivo TTS se houver erro
+            try:
+                if os.path.exists(tts_output_path):
+                    os.remove(tts_output_path)
+            except:
+                pass
+            raise HTTPException(
+                status_code=400,
+                detail=f"Erro ao decodificar áudio do usuário: {str(e)}"
+            )
+        
+        # 3. Carregar ambos os áudios usando librosa (normaliza sample rate)
+        try:
+            # Carregar TTS do título
+            title_audio, title_sr = librosa.load(tts_output_path, sr=None)
+            
+            # Carregar áudio do usuário
+            user_audio, user_sr = librosa.load(user_audio_temp, sr=None)
+            
+            # Normalizar ambos para o mesmo sample rate (usar o maior)
+            target_sr = max(title_sr, user_sr)
+            if title_sr != target_sr:
+                title_audio = librosa.resample(title_audio, orig_sr=title_sr, target_sr=target_sr)
+            if user_sr != target_sr:
+                user_audio = librosa.resample(user_audio, orig_sr=user_sr, target_sr=target_sr)
+            
+            # 4. Mesclar (concatenar) os áudios
+            merged_audio = np.concatenate([title_audio, user_audio])
+            
+            # 5. Salvar áudio mesclado
+            merged_output_path = os.path.join(OUTPUT_DIR, f"merged_{timestamp}.{output_format.lower()}")
+            
+            # Converter formato se necessário (soundfile suporta WAV, FLAC, OGG)
+            if output_format.upper() in ["WAV", "FLAC", "OGG"]:
+                sf.write(merged_output_path, merged_audio, target_sr, format=output_format.upper())
+            else:
+                # Para MP3 e M4A, salvar como WAV primeiro e converter depois se necessário
+                # Por enquanto, vamos usar OGG como padrão para compatibilidade
+                sf.write(merged_output_path, merged_audio, target_sr, format="OGG")
+                output_format = "OGG"
+            
+            # 6. Obter duração e tamanho
+            duration_seconds = len(merged_audio) / target_sr
+            file_size = os.path.getsize(merged_output_path)
+            size_kb = file_size / 1024
+            
+            # 7. Converter para base64
+            with open(merged_output_path, "rb") as f:
+                merged_audio_bytes = f.read()
+                merged_base64 = base64.b64encode(merged_audio_bytes).decode('utf-8')
+            
+            # 8. Limpar arquivos temporários
+            try:
+                os.remove(tts_output_path)
+                os.remove(user_audio_temp)
+                os.remove(merged_output_path)
+            except:
+                pass
+            
+            print(f"   ✅ Áudio mesclado com sucesso!")
+            print(f"   Duração total: {duration_seconds:.2f}s")
+            
+            return MergeAudioResponse(
+                success=True,
+                message="✅ Áudio mesclado com sucesso",
+                base64=merged_base64,
+                format=output_format.upper(),
+                duration_seconds=round(duration_seconds, 2),
+                size_kb=round(size_kb, 2)
+            )
+            
+        except Exception as e:
+            # Limpar arquivos em caso de erro
+            for file_path in [tts_output_path, user_audio_temp]:
+                try:
+                    if os.path.exists(file_path):
+                        os.remove(file_path)
+                except:
+                    pass
+            raise HTTPException(
+                status_code=500,
+                detail=f"Erro ao mesclar áudios: {str(e)}"
+            )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Erro ao mesclar áudio: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erro ao mesclar áudio: {str(e)}"
+        )
+
+
 if __name__ == "__main__":
     import argparse
     
