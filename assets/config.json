@@ -6,8 +6,8 @@
   "plugins": [],
   "discord_presence": true,
   "lang": {
-    "override": false,
-    "selected_lang": "en_US"
+    "override": true,
+    "selected_lang": "pt_PT"
   },
   "version": "3.5.1",
   "model_author": "None",
@@ -18,5 +18,6 @@
     "monitor_device": "",
     "model_file": "",
     "index_file": ""
-  }
+  },
+  "model_index_filter": false
 }
