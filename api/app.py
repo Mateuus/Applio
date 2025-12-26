@@ -105,11 +105,12 @@ def resolve_model_path(model_path_or_id: str) -> tuple[Optional[str], Optional[s
     model_info = get_model_by_id(model_path_or_id)
     
     if model_info:
-        # Encontrou no config, usar o model_path e model_index do config
-        model_path = model_info.get("model_path")
+        # Encontrou no config, usar o model_path e index_path do config
+        # Suporta ambos os formatos: model_path/path e index_path/model_index (retrocompatibilidade)
+        model_path = model_info.get("model_path") or model_info.get("path")
         if model_path and os.path.exists(model_path):
-            # Usar model_index do config se disponível, senão auto-detectar
-            index_path = model_info.get("model_index")
+            # Usar index_path ou model_index do config (prioriza index_path)
+            index_path = model_info.get("index_path") or model_info.get("model_index")
             if not index_path or not os.path.exists(index_path):
                 # Se não tem no config ou não existe, auto-detectar
                 index_path = match_index(model_path)
@@ -320,7 +321,7 @@ def clean_text(text: str) -> str:
 class GenerateRequest(BaseModel):
     """Request model para endpoint /generate - TTS com ou sem RVC"""
     text: str = Field(..., description="Texto para sintetizar", min_length=1, max_length=5000)
-    tts_voice: str = Field(..., description="Voz TTS (Edge TTS) - ShortName da voz (ex: pt-BR-FranciscaNeural). Use /voices para listar")
+    tts_voice: Optional[str] = Field(None, description="Voz TTS (Edge TTS) - ShortName da voz (ex: pt-BR-FranciscaNeural). Use /voices para listar. Se model_id for fornecido e tts_voice não for especificado, será usado o tts_voice do modelo no config")
     model_id: Optional[str] = Field(None, description="ID do modelo (ex: '16c19771-9ece-45fd-8ce5-53bb5263a63d') ou caminho completo (ex: 'logs/Lula/Lula.pth'). Se não fornecido, gera apenas TTS sem RVC. Use /models para listar IDs e caminhos disponíveis. O index será obtido automaticamente do config ou auto-detectado")
     tts_rate: int = Field(0, description="Taxa de velocidade TTS (-100 a 100)", ge=-100, le=100)
     output_format: str = Field("WAV", description="Formato de saída (WAV, MP3, FLAC, OGG, M4A)")
@@ -732,7 +733,7 @@ async def generate(request: GenerateRequest, _: bool = Depends(verify_api_key)):
     
     Parâmetros obrigatórios:
     - text: Texto para sintetizar
-    - tts_voice: Voz TTS (Edge TTS) - ShortName da voz (use /voices para listar)
+    - tts_voice: Voz TTS (Edge TTS) - ShortName da voz (use /voices para listar). Obrigatório se model_id não for fornecido. Se model_id for fornecido e tts_voice não for especificado, será usado o tts_voice do modelo no config
     
     Parâmetros opcionais:
     - model_id: ID do modelo (ex: '16c19771-9ece-45fd-8ce5-53bb5263a63d') ou caminho completo (ex: 'logs/Lula/Lula.pth') - se não fornecido, gera apenas TTS sem RVC (use /models para listar IDs e caminhos). O index será obtido automaticamente do config ou auto-detectado
@@ -760,13 +761,47 @@ async def generate(request: GenerateRequest, _: bool = Depends(verify_api_key)):
                 detail=f"Formato inválido: {output_format}. Formatos válidos: {', '.join(valid_formats)}"
             )
         
+        # Determinar tts_voice: usar do modelo se model_id fornecido e tts_voice não fornecido
+        # Também resolver modelo antecipadamente para evitar resolver duas vezes
+        tts_voice = request.tts_voice
+        resolved_model_path = None
+        auto_index_path = None
+        model_info = None
+        
+        if request.model_id and request.model_id.strip():
+            # Resolver modelo antecipadamente
+            resolved_model_path, auto_index_path, model_info = resolve_model_path(request.model_id)
+            if not resolved_model_path:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Modelo não encontrado: {request.model_id}. Use /models para listar IDs e caminhos disponíveis."
+                )
+            
+            # Se tts_voice não foi fornecido, usar do modelo
+            if not tts_voice:
+                if model_info and model_info.get("tts_voice"):
+                    tts_voice = model_info.get("tts_voice")
+                    print(f"📢 Usando tts_voice do modelo: {tts_voice}")
+                else:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"tts_voice não fornecido e modelo '{request.model_id}' não possui tts_voice configurado no models_config.json. Forneça tts_voice explicitamente."
+                    )
+        else:
+            # Se não há model_id, tts_voice é obrigatório
+            if not tts_voice:
+                raise HTTPException(
+                    status_code=400,
+                    detail="tts_voice é obrigatório quando model_id não é fornecido"
+                )
+        
         # Validar voz TTS
         voices_data = load_tts_voices()
         voice_names = [v.get("ShortName", "") for v in voices_data]
-        if request.tts_voice not in voice_names:
+        if tts_voice and tts_voice not in voice_names:
             raise HTTPException(
                 status_code=404,
-                detail=f"Voz TTS não encontrada: {request.tts_voice}. Use /voices para listar vozes disponíveis."
+                detail=f"Voz TTS não encontrada: {tts_voice}. Use /voices para listar vozes disponíveis."
             )
         
         # Criar arquivos temporários
@@ -783,7 +818,7 @@ async def generate(request: GenerateRequest, _: bool = Depends(verify_api_key)):
             
             print(f"\n🎤 Gerando TTS apenas (sem RVC)...")
             print(f"   Texto: {cleaned_text[:50]}...")
-            print(f"   Voz TTS: {request.tts_voice}")
+            print(f"   Voz TTS: {tts_voice}")
             print(f"   Formato: {output_format}")
             
             # Gerar TTS
@@ -791,7 +826,7 @@ async def generate(request: GenerateRequest, _: bool = Depends(verify_api_key)):
                 message, output_file = run_tts_only_script(
                     tts_file="",
                     tts_text=cleaned_text,
-                    tts_voice=request.tts_voice,
+                    tts_voice=tts_voice,
                     tts_rate=request.tts_rate,
                     output_path=tts_output_path,
                     export_format=output_format,
@@ -844,7 +879,7 @@ async def generate(request: GenerateRequest, _: bool = Depends(verify_api_key)):
                 success=True,
                 message=message or "✅ Áudio TTS gerado com sucesso (sem RVC)",
                 text=cleaned_text,
-                tts_voice=request.tts_voice,
+                tts_voice=tts_voice,
                 model_path=None,
                 index_path=None,
                 output_file=None,
@@ -856,15 +891,7 @@ async def generate(request: GenerateRequest, _: bool = Depends(verify_api_key)):
             )
         
         else:
-            # Resolver model_id (pode ser ID ou caminho completo)
-            resolved_model_path, auto_index_path, model_info = resolve_model_path(request.model_id)
-            
-            if not resolved_model_path:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Modelo não encontrado: {request.model_id}. Use /models para listar IDs e caminhos disponíveis."
-                )
-            
+            # Usar valores já resolvidos anteriormente
             # Usar index_path auto-detectado (do config ou match_index)
             index_path = auto_index_path
             
@@ -888,7 +915,7 @@ async def generate(request: GenerateRequest, _: bool = Depends(verify_api_key)):
             print(f"\n🎤 Gerando TTS + RVC...")
             print(f"   Device: {config.device}{device_info}")
             print(f"   Texto: {cleaned_text[:50]}...")
-            print(f"   Voz TTS: {request.tts_voice}")
+            print(f"   Voz TTS: {tts_voice}")
             print(f"   Modelo RVC: {actual_model_path}" + (f" (ID: {request.model_id})" if model_info else ""))
             print(f"   Index: {index_path}")
             print(f"   Formato: {output_format}")
@@ -898,7 +925,7 @@ async def generate(request: GenerateRequest, _: bool = Depends(verify_api_key)):
                 message, output_file = run_tts_script(
                     tts_file="",
                     tts_text=cleaned_text,
-                    tts_voice=request.tts_voice,
+                    tts_voice=tts_voice,
                     tts_rate=request.tts_rate,
                     pitch=0,
                     index_rate=0.75,
@@ -964,7 +991,7 @@ async def generate(request: GenerateRequest, _: bool = Depends(verify_api_key)):
                 success=True,
                 message=message or "✅ Áudio TTS + RVC gerado com sucesso",
                 text=cleaned_text,
-                tts_voice=request.tts_voice,
+                tts_voice=tts_voice,
                 model_path=actual_model_path,  # Retornar caminho resolvido
                 index_path=index_path,
                 output_file=None,
@@ -1470,7 +1497,8 @@ async def transcribe_audio(
 class MergeAudioRequest(BaseModel):
     """Request model para mesclar TTS do título com áudio do usuário"""
     title_text: str = Field(..., description="Texto do título para gerar TTS (ex: 'Mateuus mandou R$ 10,00')", min_length=1, max_length=200)
-    tts_voice: str = Field(..., description="Voz TTS (Edge TTS) - ShortName da voz (ex: pt-BR-AntonioNeural)")
+    tts_voice: Optional[str] = Field(None, description="Voz TTS (Edge TTS) - ShortName da voz (ex: pt-BR-AntonioNeural). Obrigatório se model_id não for fornecido. Se model_id for fornecido e tts_voice não for especificado, será usado o tts_voice do modelo no config")
+    model_id: Optional[str] = Field(None, description="ID do modelo (ex: '16c19771-9ece-45fd-8ce5-53bb5263a63d') ou caminho completo (ex: 'logs/Lula/Lula.pth'). Se fornecido, usa TTS + RVC. Se não fornecido, usa apenas TTS. Use /models para listar IDs e caminhos disponíveis")
     user_audio_base64: str = Field(..., description="Áudio do usuário em base64")
     output_format: str = Field("OGG", description="Formato de saída (WAV, MP3, FLAC, OGG, M4A). Padrão: OGG")
 
@@ -1494,13 +1522,20 @@ async def merge_audio_with_title(
     Mescla TTS do título com áudio do usuário
     
     Este endpoint:
-    1. Gera TTS do título usando Edge TTS
+    1. Gera TTS do título usando Edge TTS (ou TTS + RVC se model_id fornecido)
     2. Decodifica o áudio do usuário (base64)
     3. Mescla os dois áudios (concatena)
     4. Retorna o áudio mesclado em base64 com duração
     
+    Parâmetros:
+    - title_text: Texto do título para gerar TTS
+    - tts_voice: Voz TTS (Edge TTS) - Obrigatório se model_id não for fornecido
+    - model_id: ID do modelo RVC (opcional) - Se fornecido, usa TTS + RVC ao invés de apenas TTS
+    - user_audio_base64: Áudio do usuário em base64
+    - output_format: Formato de saída (padrão: OGG)
+    
     Args:
-        request: MergeAudioRequest com título, voz TTS e áudio do usuário
+        request: MergeAudioRequest com título, voz TTS (opcional), model_id (opcional) e áudio do usuário
     
     Returns:
         MergeAudioResponse com áudio mesclado em base64 e duração
@@ -1527,33 +1562,109 @@ async def merge_audio_with_title(
                 detail=f"Formato inválido: {output_format}. Formatos válidos: {', '.join(valid_formats)}"
             )
         
+        # Determinar tts_voice e resolver model_id se fornecido
+        tts_voice = request.tts_voice
+        resolved_model_path = None
+        auto_index_path = None
+        model_info = None
+        
+        if request.model_id and request.model_id.strip():
+            # Resolver modelo antecipadamente
+            resolved_model_path, auto_index_path, model_info = resolve_model_path(request.model_id)
+            if not resolved_model_path:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Modelo não encontrado: {request.model_id}. Use /models para listar IDs e caminhos disponíveis."
+                )
+            
+            # Se tts_voice não foi fornecido, usar do modelo
+            if not tts_voice:
+                if model_info and model_info.get("tts_voice"):
+                    tts_voice = model_info.get("tts_voice")
+                    print(f"📢 Usando tts_voice do modelo: {tts_voice}")
+                else:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"tts_voice não fornecido e modelo '{request.model_id}' não possui tts_voice configurado no models_config.json. Forneça tts_voice explicitamente."
+                    )
+        else:
+            # Se não há model_id, tts_voice é obrigatório
+            if not tts_voice:
+                raise HTTPException(
+                    status_code=400,
+                    detail="tts_voice é obrigatório quando model_id não é fornecido"
+                )
+        
         # Validar voz TTS
         voices_data = load_tts_voices()
         voice_names = [v.get("ShortName", "") for v in voices_data]
-        if request.tts_voice not in voice_names:
+        if tts_voice and tts_voice not in voice_names:
             raise HTTPException(
                 status_code=404,
-                detail=f"Voz TTS não encontrada: {request.tts_voice}. Use /voices para listar vozes disponíveis."
+                detail=f"Voz TTS não encontrada: {tts_voice}. Use /voices para listar vozes disponíveis."
             )
         
         print(f"\n🎤 Mesclando áudio com título...")
         print(f"   Título: {cleaned_title}")
-        print(f"   Voz TTS: {request.tts_voice}")
+        print(f"   Voz TTS: {tts_voice}")
+        if resolved_model_path:
+            print(f"   Modelo RVC: {resolved_model_path}" + (f" (ID: {request.model_id})" if model_info else ""))
         print(f"   Formato: {output_format}")
         
-        # 1. Gerar TTS do título
+        # 1. Gerar TTS do título (com ou sem RVC)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         tts_output_path = os.path.join(OUTPUT_DIR, f"tts_title_{timestamp}.wav")
         
         try:
-            message, tts_file = run_tts_only_script(
-                tts_file="",
-                tts_text=cleaned_title,
-                tts_voice=request.tts_voice,
-                tts_rate=0,
-                output_path=tts_output_path,
-                export_format="WAV",
-            )
+            if resolved_model_path:
+                # Usar TTS + RVC
+                index_path = auto_index_path
+                if index_path and not os.path.exists(index_path):
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"Arquivo index não encontrado: {index_path}"
+                    )
+                
+                rvc_output_path = os.path.join(OUTPUT_DIR, f"tts_rvc_title_{timestamp}.wav")
+                
+                message, tts_file = run_tts_script(
+                    tts_file="",
+                    tts_text=cleaned_title,
+                    tts_voice=tts_voice,
+                    tts_rate=0,
+                    pitch=0,
+                    index_rate=0.75,
+                    volume_envelope=1.0,
+                    protect=0.5,
+                    f0_method="rmvpe",
+                    output_tts_path=tts_output_path,
+                    output_rvc_path=rvc_output_path,
+                    pth_path=resolved_model_path,
+                    index_path=index_path or "",
+                    split_audio=False,
+                    f0_autotune=False,
+                    f0_autotune_strength=1.0,
+                    proposed_pitch=False,
+                    proposed_pitch_threshold=155.0,
+                    clean_audio=False,
+                    clean_strength=0.5,
+                    export_format="WAV",
+                    embedder_model="contentvec",
+                    embedder_model_custom=None,
+                    sid=0,
+                )
+                # Usar o arquivo RVC gerado
+                tts_output_path = rvc_output_path
+            else:
+                # Usar apenas TTS (sem RVC)
+                message, tts_file = run_tts_only_script(
+                    tts_file="",
+                    tts_text=cleaned_title,
+                    tts_voice=tts_voice,
+                    tts_rate=0,
+                    output_path=tts_output_path,
+                    export_format="WAV",
+                )
         except Exception as e:
             raise HTTPException(
                 status_code=500,
@@ -1626,7 +1737,14 @@ async def merge_audio_with_title(
             
             # 8. Limpar arquivos temporários
             try:
-                os.remove(tts_output_path)
+                # Remove arquivo TTS (pode ser TTS apenas ou RVC)
+                if os.path.exists(tts_output_path):
+                    os.remove(tts_output_path)
+                # Remove arquivo TTS intermediário se foi gerado RVC
+                if resolved_model_path:
+                    tts_intermediate = os.path.join(OUTPUT_DIR, f"tts_title_{timestamp}.wav")
+                    if os.path.exists(tts_intermediate):
+                        os.remove(tts_intermediate)
                 os.remove(user_audio_temp)
                 os.remove(merged_output_path)
             except:
@@ -1646,7 +1764,12 @@ async def merge_audio_with_title(
             
         except Exception as e:
             # Limpar arquivos em caso de erro
-            for file_path in [tts_output_path, user_audio_temp]:
+            files_to_clean = [tts_output_path, user_audio_temp]
+            if resolved_model_path:
+                # Adicionar arquivo TTS intermediário se foi gerado RVC
+                tts_intermediate = os.path.join(OUTPUT_DIR, f"tts_title_{timestamp}.wav")
+                files_to_clean.append(tts_intermediate)
+            for file_path in files_to_clean:
                 try:
                     if os.path.exists(file_path):
                         os.remove(file_path)
