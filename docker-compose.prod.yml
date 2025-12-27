@@ -10,6 +10,72 @@ version: '3.8'
 
 services:
   # ============================================
+  # Applio Gradio Interface (com autenticação)
+  # ============================================
+  applio-gradio:
+    image: mateuus27/applio-api:latest
+    restart: unless-stopped
+    
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - DISABLE_DISCORD_PRESENCE=1
+      - DOCKER_CONTAINER=1
+    
+    volumes:
+      - ./logs:/app/logs
+      - ./api/logs:/app/api/logs
+      - ./assets:/app/assets
+      - ./rvc/models:/app/rvc/models
+      - ./api/config:/app/api/config:ro
+      - ./outputs:/app/outputs
+      - ./uploads:/app/uploads
+    
+    # Comando para rodar a interface Gradio
+    command: ["/app/.venv/bin/python3", "app.py", "--host", "0.0.0.0", "--port", "6969"]
+    
+    # Labels do Traefik com autenticação básica
+    labels:
+      - "traefik.enable=true"
+      # Router para interface Gradio (com autenticação)
+      - "traefik.http.routers.applio-gradio.rule=Host(`voice-ui.eopix.me`)"
+      - "traefik.http.routers.applio-gradio.entrypoints=websecure"
+      - "traefik.http.routers.applio-gradio.tls.certresolver=le"
+      - "traefik.http.routers.applio-gradio.tls=true"
+      - "traefik.http.services.applio-gradio.loadbalancer.server.port=6969"
+      - "traefik.http.services.applio-gradio.loadbalancer.passHostHeader=true"
+      - "traefik.http.services.applio-gradio.loadbalancer.server.scheme=http"
+      # Middleware de autenticação básica
+      # IMPORTANTE: Substitua o hash abaixo pelo hash da sua senha
+      # Para gerar o hash, execute: ./generate-password-hash.sh
+      # Ou manualmente: htpasswd -nb usuario senha | sed 's/\$/\$\$/g'
+      # Formato: usuario:$$apr1$$hash_aqui
+      - "traefik.http.middlewares.applio-gradio-auth.basicauth.users=Mateuus27:$$apr1$$qLPM0Hfz$$vUSwUrV3b0t3i4CcdPdF41"
+      # Aplicar middleware de autenticação
+      - "traefik.http.routers.applio-gradio.middlewares=applio-gradio-auth"
+    
+    networks:
+      - web
+    
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # ============================================
   # Applio API - Production
   # ============================================
   applio-api:
