@@ -1,0 +1,115 @@
+# ============================================
+# Docker Compose - Applio API (PRODUÇÃO)
+# ============================================
+# Para produção com otimizações e segurança
+# Traefik como reverse proxy
+# Configurado para múltiplas instâncias (load balancing)
+# ============================================
+
+version: '3.8'
+
+services:
+  # ============================================
+  # Applio API - Production
+  # ============================================
+  applio-api:
+    # Usar imagem do Docker Hub ou build local
+    # IMPORTANTE: Para produção, use imagem otimizada
+    image: mateuus27/applio-api:latest
+    # Alternativa: usar build local (descomente e comente a linha acima)
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile
+    #   target: production  # Se houver stage de produção no Dockerfile
+    
+    # container_name removido para permitir scale (múltiplas instâncias)
+    # Se precisar de nome fixo, use apenas para instância única
+    # container_name: applio-api-prod
+    restart: unless-stopped
+    
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - DISABLE_DISCORD_PRESENCE=1
+      - DOCKER_CONTAINER=1
+    
+    volumes:
+      # Volumes necessários
+      - ./logs:/app/logs
+      - ./api/logs:/app/api/logs
+      - ./assets:/app/assets:ro  # Read-only para assets
+      - ./rvc/models:/app/rvc/models  # Modelos RVC
+      - ./api/config:/app/api/config:ro  # Configurações (read-only)
+      # Output e upload directories
+      - ./outputs:/app/outputs
+      - ./uploads:/app/uploads
+    
+    # Comando para rodar a API FastAPI
+    command: ["/app/.venv/bin/python3", "api/app.py", "--host", "0.0.0.0", "--port", "8000"]
+    
+    # Labels do Traefik
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.applio.rule=Host(`voice.eopix.me`)"
+      - "traefik.http.routers.applio.entrypoints=websecure"
+      - "traefik.http.routers.applio.tls.certresolver=le"
+      - "traefik.http.routers.applio.tls=true"
+      - "traefik.http.services.applio.loadbalancer.server.port=8000"
+      - "traefik.http.services.applio.loadbalancer.passHostHeader=true"
+      - "traefik.http.services.applio.loadbalancer.server.scheme=http"
+      # Sticky Sessions para WebSockets (mantém conexão na mesma instância)
+      # IMPORTANTE: Necessário para WebSockets funcionarem corretamente com múltiplas instâncias
+      # Se não usar sticky sessions, clientes WebSocket podem perder conexão ao mudar de instância
+      - "traefik.http.services.applio.loadbalancer.sticky.cookie=true"
+      - "traefik.http.services.applio.loadbalancer.sticky.cookie.name=applio_session"
+      - "traefik.http.services.applio.loadbalancer.sticky.cookie.secure=true"
+      - "traefik.http.services.applio.loadbalancer.sticky.cookie.httpOnly=true"
+      # Health check
+      - "traefik.http.services.applio.loadbalancer.healthCheck.path=/health"
+      - "traefik.http.services.applio.loadbalancer.healthCheck.interval=60s"
+      - "traefik.http.services.applio.loadbalancer.healthCheck.timeout=30s"
+      # Middleware opcional (rate limiting, auth, etc)
+      # - "traefik.http.routers.applio.middlewares=rate-limit@docker"
+    
+    networks:
+      - web
+    
+    healthcheck:
+      test: ["CMD", "/app/.venv/bin/python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health').read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s  # Tempo maior para carregar modelos
+    
+    # GPU support (NVIDIA)
+    # Nota: deploy.resources funciona no Docker Compose v3.8+ e Docker Swarm
+    # Para Docker Compose standalone, certifique-se de ter Docker Compose v2.3+
+    # e nvidia-container-runtime configurado
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    
+    # Logging
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    
+    # Para acessar serviços externos, use host.docker.internal (Linux/Mac)
+    # ou o IP do host. No Linux, pode ser necessário usar network_mode: host
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+# ============================================
+# Networks
+# ============================================
+networks:
+  web:
+    external: true
+

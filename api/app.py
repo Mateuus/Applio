@@ -1803,7 +1803,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     uvicorn.run(
-        "app:app",
+        "api.app:app",  # Corrigido: usar api.app já que o arquivo está em api/app.py
         host=args.host,
         port=args.port,
         reload=args.reload

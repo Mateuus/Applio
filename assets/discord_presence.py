@@ -10,6 +10,13 @@ class RichPresenceManager:
 
     def start_presence(self):
         if not self.running:
+            # Skip Discord presence in Docker/container environments
+            import os
+            if os.getenv('DISABLE_DISCORD_PRESENCE', '').lower() in ('1', 'true', 'yes') or \
+               os.path.exists('/.dockerenv') or \
+               os.getenv('DOCKER_CONTAINER', '').lower() in ('1', 'true', 'yes'):
+                return
+            
             self.running = True
             self.rpc = Presence(self.client_id)
             try:
@@ -20,7 +27,17 @@ class RichPresenceManager:
                 self.rpc = None
                 self.running = False
             except Exception as error:
-                print(f"An error occurred connecting to Discord: {error}")
+                # Silently fail in container environments or when Discord is not available
+                import os
+                error_str = str(error).lower()
+                is_docker = os.path.exists('/.dockerenv') or os.getenv('DOCKER_CONTAINER')
+                is_discord_error = 'discord' in error_str or 'event loop' in error_str or 'not found' in error_str
+                
+                if is_docker or is_discord_error:
+                    # Silently ignore in Docker or when Discord is not available
+                    pass
+                else:
+                    print(f"An error occurred connecting to Discord: {error}")
                 self.rpc = None
                 self.running = False
 

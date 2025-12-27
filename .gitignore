@@ -22,3 +22,9 @@ rvc/models
 env
 venv
 .venv
+
+# Environment files
+.env
+api/.env
+*.log
+api.log
