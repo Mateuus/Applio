@@ -64,13 +64,14 @@ services:
     networks:
       - web
     
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+    # GPU desabilitado - produção usa CPU apenas
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
     
     logging:
       driver: "json-file"
@@ -155,17 +156,14 @@ services:
       retries: 3
       start_period: 60s  # Tempo maior para carregar modelos
     
-    # GPU support (NVIDIA)
-    # Nota: deploy.resources funciona no Docker Compose v3.8+ e Docker Swarm
-    # Para Docker Compose standalone, certifique-se de ter Docker Compose v2.3+
-    # e nvidia-container-runtime configurado
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+    # GPU desabilitado - produção usa CPU apenas
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
     
     # Logging
     logging:
