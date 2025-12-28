@@ -1,0 +1,112 @@
+# ============================================
+# Docker Compose - Applio (TESTE LOCAL)
+# ============================================
+# Para testes locais sem Traefik
+# Expõe portas diretamente no host
+# ============================================
+
+services:
+  # ============================================
+  # Applio Gradio Interface (para testes locais)
+  # ============================================
+  applio-gradio:
+    image: mateuus27/applio-api:latest
+    restart: unless-stopped
+    
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - DISABLE_DISCORD_PRESENCE=1
+      - DOCKER_CONTAINER=1
+    
+    volumes:
+      - ./logs:/app/logs
+      - ./api/logs:/app/api/logs
+      - ./assets:/app/assets
+      - ./rvc/models:/app/rvc/models
+      - ./api/config:/app/api/config:ro
+      - ./outputs:/app/outputs
+      - ./uploads:/app/uploads
+    
+    # Comando para rodar a interface Gradio
+    # O ENTRYPOINT já define python3, então só passamos os argumentos
+    # IMPORTANTE: app.py usa --server-name, não --host
+    command: ["app.py", "--server-name", "0.0.0.0", "--port", "6969"]
+    
+    # Expor porta diretamente (sem Traefik)
+    ports:
+      - "6969:6969"
+    
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # ============================================
+  # Applio API (para testes locais)
+  # ============================================
+  applio-api:
+    image: mateuus27/applio-api:latest
+    restart: unless-stopped
+    
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - DISABLE_DISCORD_PRESENCE=1
+      - DOCKER_CONTAINER=1
+    
+    volumes:
+      - ./logs:/app/logs
+      - ./api/logs:/app/api/logs
+      - ./assets:/app/assets:ro
+      - ./rvc/models:/app/rvc/models
+      - ./api/config:/app/api/config:ro
+      - ./outputs:/app/outputs
+      - ./uploads:/app/uploads
+    
+    # Comando para rodar a API FastAPI
+    # O ENTRYPOINT já define python3, então só passamos os argumentos
+    command: ["api/app.py", "--host", "0.0.0.0", "--port", "8000"]
+    
+    # Expor porta diretamente (sem Traefik)
+    ports:
+      - "8000:8000"
+    
+    healthcheck:
+      test: ["CMD", "/app/.venv/bin/python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health').read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+

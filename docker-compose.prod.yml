@@ -6,8 +6,6 @@
 # Configurado para múltiplas instâncias (load balancing)
 # ============================================
 
-version: '3.8'
-
 services:
   # ============================================
   # Applio Gradio Interface (com autenticação)
@@ -16,8 +14,9 @@ services:
     image: mateuus27/applio-api:latest
     restart: unless-stopped
     
-    env_file:
-      - .env
+    # env_file é opcional - crie .env se precisar de variáveis específicas
+    # env_file:
+    #   - .env
     environment:
       - PYTHONUNBUFFERED=1
       - DISABLE_DISCORD_PRESENCE=1
@@ -33,7 +32,14 @@ services:
       - ./uploads:/app/uploads
     
     # Comando para rodar a interface Gradio
-    command: ["/app/.venv/bin/python3", "app.py", "--host", "0.0.0.0", "--port", "6969"]
+    # O ENTRYPOINT já define python3, então só passamos os argumentos
+    # IMPORTANTE: app.py usa --server-name, não --host
+    command: ["app.py", "--server-name", "0.0.0.0", "--port", "6969"]
+    
+    # Expor portas para testes locais (comentar em produção com Traefik)
+    # Em produção, remova esta seção e use apenas Traefik
+    ports:
+      - "6969:6969"
     
     # Labels do Traefik com autenticação básica
     labels:
@@ -112,7 +118,8 @@ services:
       - ./uploads:/app/uploads
     
     # Comando para rodar a API FastAPI
-    command: ["/app/.venv/bin/python3", "api/app.py", "--host", "0.0.0.0", "--port", "8000"]
+    # O ENTRYPOINT já define python3, então só passamos os argumentos
+    command: ["api/app.py", "--host", "0.0.0.0", "--port", "8000"]
     
     # Labels do Traefik
     labels:
