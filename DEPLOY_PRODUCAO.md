@@ -86,42 +86,29 @@ DOCKER_CONTAINER=1
 PYTHONUNBUFFERED=1
 ```
 
-### 4. Garantir que o Diretório Assets está Completo
+### 4. Configuração de Volumes (IMPORTANTE)
 
-**⚠️ CRÍTICO:** Como o volume `./assets:/app/assets` monta o diretório do host, ele sobrescreve o diretório da imagem. É necessário que o diretório `assets` no servidor tenha **TODOS** os arquivos necessários:
+**✅ CORRIGIDO:** O `docker-compose.prod.yml` foi atualizado para **NÃO** montar o diretório `assets` completo, apenas os subdiretórios que precisam ser persistentes:
 
-```bash
-# Garantir que o código está atualizado
-git pull origin main
+- `assets/audios` - Áudios gerados
+- `assets/datasets` - Datasets de treinamento
+- `assets/uploads` - Uploads temporários
+- `assets/presets` - Presets de configuração
+- `assets/formant_shift` - Arquivos de formant shift
 
-# Verificar se o diretório assets tem os arquivos necessários
-ls -la assets/i18n/i18n.py
-# Deve mostrar o arquivo i18n.py
+**Por que isso é importante?**
+- Os arquivos Python (`i18n.py`, `discord_presence.py`, etc.) ficam na imagem Docker
+- Apenas os dados persistentes são montados do host
+- Isso evita sobrescrever os arquivos da imagem com diretórios vazios do host
 
-# Se o arquivo não existir, o diretório assets está incompleto
-# Execute novamente: git pull
-```
+**Não é mais necessário:**
+- ❌ Criar arquivos `__init__.py` no servidor
+- ❌ Garantir que o diretório `assets` está completo no servidor
+- ❌ Executar `fix-assets-init.sh`
 
-### 5. Criar Arquivos __init__.py (IMPORTANTE)
+Os arquivos Python de `assets` agora vêm diretamente da imagem Docker!
 
-**⚠️ CRÍTICO:** Os arquivos `__init__.py` da imagem são sobrescritos pelo volume. É necessário criá-los no servidor:
-
-```bash
-# Executar o script que cria os arquivos necessários
-./fix-assets-init.sh
-
-# OU criar manualmente:
-mkdir -p assets/i18n assets/themes
-echo "# assets package" > assets/__init__.py
-echo "# i18n package" > assets/i18n/__init__.py
-echo "# themes package" > assets/themes/__init__.py
-
-# Verificar se o arquivo i18n.py existe (CRÍTICO)
-ls -la assets/i18n/i18n.py
-# Se não existir, execute: git pull
-```
-
-### 6. Configurar Autenticação Gradio (Opcional)
+### 5. Configurar Autenticação Gradio (Opcional)
 
 Se quiser alterar a senha do Gradio:
 
@@ -133,14 +120,14 @@ Se quiser alterar a senha do Gradio:
 # Linha 60: traefik.http.middlewares.applio-gradio-auth.basicauth.users
 ```
 
-### 7. Fazer Pull da Imagem Docker
+### 6. Fazer Pull da Imagem Docker
 
 ```bash
 # Fazer pull da imagem mais recente do Docker Hub
 docker-compose -f docker-compose.prod.yml pull
 ```
 
-### 8. Remover Portas Expostas (Produção)
+### 7. Remover Portas Expostas (Produção)
 
 **IMPORTANTE:** Em produção, remova a seção `ports` do `applio-gradio` no `docker-compose.prod.yml`:
 
@@ -157,7 +144,7 @@ nano docker-compose.prod.yml
 # Comente as linhas 41-42 (ports do applio-gradio)
 ```
 
-### 9. Iniciar os Serviços
+### 8. Iniciar os Serviços
 
 ```bash
 # Parar containers antigos (se existirem)
@@ -171,7 +158,7 @@ docker-compose -f docker-compose.prod.yml up -d
 # docker-compose -f docker-compose.prod.yml up -d applio-gradio
 ```
 
-### 10. Verificar Status
+### 9. Verificar Status
 
 ```bash
 # Ver status dos containers
@@ -185,7 +172,7 @@ docker-compose -f docker-compose.prod.yml logs -f applio-api
 docker-compose -f docker-compose.prod.yml logs -f applio-gradio
 ```
 
-### 11. Verificar Traefik
+### 10. Verificar Traefik
 
 ```bash
 # Reiniciar Traefik para detectar os novos containers
@@ -201,7 +188,7 @@ docker logs traefik --tail=50 | grep -i applio
 # Acesse o dashboard do Traefik: http://seu-servidor:8080
 ```
 
-### 12. Testar os Serviços
+### 11. Testar os Serviços
 
 ```bash
 # Testar API via HTTPS
@@ -324,45 +311,28 @@ docker logs traefik --tail=100
 
 ### ModuleNotFoundError: No module named 'assets.i18n' ou 'assets.i18n.i18n'
 
-**Causa:** O volume `./assets:/app/assets` monta o diretório do host, sobrescrevendo o diretório da imagem Docker. Isso pode causar dois problemas:
+**Causa (ANTIGA):** O volume `./assets:/app/assets` montava o diretório do host, sobrescrevendo o diretório da imagem Docker.
 
-1. **Faltam arquivos `__init__.py`** → Erro: `No module named 'assets.i18n'`
-2. **Falta o arquivo `i18n.py`** → Erro: `No module named 'assets.i18n.i18n'`
+**✅ SOLUÇÃO IMPLEMENTADA:** O `docker-compose.prod.yml` foi atualizado para montar apenas os subdiretórios necessários, não o diretório `assets` completo. Os arquivos Python agora vêm diretamente da imagem Docker.
 
-**Solução:**
-
-```bash
-# 1. Garantir que o código está atualizado (CRÍTICO)
-git pull origin main
-
-# 2. Verificar se o arquivo i18n.py existe
-ls -la assets/i18n/i18n.py
-# Se não existir, o diretório assets está incompleto!
-
-# 3. Executar o script que cria os arquivos __init__.py
-./fix-assets-init.sh
-
-# 4. Verificar se todos os arquivos necessários existem
-ls -la assets/__init__.py
-ls -la assets/i18n/__init__.py
-ls -la assets/i18n/i18n.py  # Este é CRÍTICO!
-ls -la assets/themes/__init__.py
-
-# 5. Reiniciar os containers
-docker-compose -f docker-compose.prod.yml restart
-```
-
-**Se o erro persistir:**
+**Se ainda aparecer o erro:**
 
 ```bash
-# Verificar se o diretório assets tem todos os arquivos
-find assets -name "*.py" | head -20
+# 1. Verificar se está usando a versão atualizada do docker-compose.prod.yml
+grep -A 5 "assets" docker-compose.prod.yml
+# Deve mostrar volumes individuais (assets/audios, assets/datasets, etc.)
+# NÃO deve mostrar: ./assets:/app/assets
 
-# Se faltar arquivos, fazer pull novamente
+# 2. Se ainda estiver montando ./assets:/app/assets, atualize o arquivo:
 git pull origin main
 
-# Verificar se o volume está montando corretamente
+# 3. Recriar os containers
+docker-compose -f docker-compose.prod.yml down
+docker-compose -f docker-compose.prod.yml up -d
+
+# 4. Verificar se os arquivos estão na imagem
 docker exec applio-api ls -la /app/assets/i18n/
+# Deve mostrar i18n.py, __init__.py, etc.
 ```
 
 ### Erro relacionado a GPU (se aparecer)

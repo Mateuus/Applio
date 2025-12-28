@@ -25,7 +25,15 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./api/logs:/app/api/logs
-      - ./assets:/app/assets
+      # Montar apenas subdiretórios de assets que precisam ser persistentes
+      # NÃO montar ./assets:/app/assets pois isso sobrescreve os arquivos da imagem
+      - ./assets/audios:/app/assets/audios
+      - ./assets/datasets:/app/assets/datasets
+      - ./assets/uploads:/app/assets/uploads
+      - ./assets/presets:/app/assets/presets
+      - ./assets/formant_shift:/app/assets/formant_shift
+      # Config.json pode ser montado se precisar de customização
+      # - ./assets/config.json:/app/assets/config.json:ro
       - ./rvc/models:/app/rvc/models
       - ./api/config:/app/api/config:ro
       - ./outputs:/app/outputs
@@ -111,7 +119,15 @@ services:
       # Volumes necessários
       - ./logs:/app/logs
       - ./api/logs:/app/api/logs
-      - ./assets:/app/assets:ro  # Read-only para assets
+      # Montar apenas subdiretórios de assets que precisam ser persistentes
+      # NÃO montar ./assets:/app/assets pois isso sobrescreve os arquivos da imagem
+      - ./assets/audios:/app/assets/audios
+      - ./assets/datasets:/app/assets/datasets
+      - ./assets/uploads:/app/assets/uploads
+      - ./assets/presets:/app/assets/presets
+      - ./assets/formant_shift:/app/assets/formant_shift
+      # Config.json pode ser montado se precisar de customização
+      # - ./assets/config.json:/app/assets/config.json:ro
       - ./rvc/models:/app/rvc/models  # Modelos RVC
       - ./api/config:/app/api/config:ro  # Configurações (read-only)
       # Output e upload directories

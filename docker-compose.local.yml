@@ -23,7 +23,13 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./api/logs:/app/api/logs
-      - ./assets:/app/assets
+      # Montar apenas subdiretórios de assets que precisam ser persistentes
+      # NÃO montar ./assets:/app/assets pois isso sobrescreve os arquivos da imagem
+      - ./assets/audios:/app/assets/audios
+      - ./assets/datasets:/app/assets/datasets
+      - ./assets/uploads:/app/assets/uploads
+      - ./assets/presets:/app/assets/presets
+      - ./assets/formant_shift:/app/assets/formant_shift
       - ./rvc/models:/app/rvc/models
       - ./api/config:/app/api/config:ro
       - ./outputs:/app/outputs
@@ -72,7 +78,13 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./api/logs:/app/api/logs
-      - ./assets:/app/assets:ro
+      # Montar apenas subdiretórios de assets que precisam ser persistentes
+      # NÃO montar ./assets:/app/assets pois isso sobrescreve os arquivos da imagem
+      - ./assets/audios:/app/assets/audios
+      - ./assets/datasets:/app/assets/datasets
+      - ./assets/uploads:/app/assets/uploads
+      - ./assets/presets:/app/assets/presets
+      - ./assets/formant_shift:/app/assets/formant_shift
       - ./rvc/models:/app/rvc/models
       - ./api/config:/app/api/config:ro
       - ./outputs:/app/outputs
