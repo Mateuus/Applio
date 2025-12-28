@@ -86,7 +86,22 @@ DOCKER_CONTAINER=1
 PYTHONUNBUFFERED=1
 ```
 
-### 4. Configurar Autenticação Gradio (Opcional)
+### 4. Criar Arquivos __init__.py (IMPORTANTE)
+
+**⚠️ CRÍTICO:** Como o volume `./assets:/app/assets` monta o diretório do host, os arquivos `__init__.py` da imagem são sobrescritos. É necessário criá-los no servidor:
+
+```bash
+# Executar o script que cria os arquivos necessários
+./fix-assets-init.sh
+
+# OU criar manualmente:
+mkdir -p assets/i18n assets/themes
+echo "# assets package" > assets/__init__.py
+echo "# i18n package" > assets/i18n/__init__.py
+echo "# themes package" > assets/themes/__init__.py
+```
+
+### 5. Configurar Autenticação Gradio (Opcional)
 
 Se quiser alterar a senha do Gradio:
 
@@ -98,14 +113,14 @@ Se quiser alterar a senha do Gradio:
 # Linha 60: traefik.http.middlewares.applio-gradio-auth.basicauth.users
 ```
 
-### 5. Fazer Pull da Imagem Docker
+### 6. Fazer Pull da Imagem Docker
 
 ```bash
 # Fazer pull da imagem mais recente do Docker Hub
 docker-compose -f docker-compose.prod.yml pull
 ```
 
-### 6. Remover Portas Expostas (Produção)
+### 7. Remover Portas Expostas (Produção)
 
 **IMPORTANTE:** Em produção, remova a seção `ports` do `applio-gradio` no `docker-compose.prod.yml`:
 
@@ -122,7 +137,7 @@ nano docker-compose.prod.yml
 # Comente as linhas 41-42 (ports do applio-gradio)
 ```
 
-### 7. Iniciar os Serviços
+### 8. Iniciar os Serviços
 
 ```bash
 # Parar containers antigos (se existirem)
@@ -136,7 +151,7 @@ docker-compose -f docker-compose.prod.yml up -d
 # docker-compose -f docker-compose.prod.yml up -d applio-gradio
 ```
 
-### 8. Verificar Status
+### 9. Verificar Status
 
 ```bash
 # Ver status dos containers
@@ -150,7 +165,7 @@ docker-compose -f docker-compose.prod.yml logs -f applio-api
 docker-compose -f docker-compose.prod.yml logs -f applio-gradio
 ```
 
-### 9. Verificar Traefik
+### 10. Verificar Traefik
 
 ```bash
 # Reiniciar Traefik para detectar os novos containers
@@ -166,7 +181,7 @@ docker logs traefik --tail=50 | grep -i applio
 # Acesse o dashboard do Traefik: http://seu-servidor:8080
 ```
 
-### 10. Testar os Serviços
+### 11. Testar os Serviços
 
 ```bash
 # Testar API via HTTPS
@@ -285,6 +300,32 @@ docker restart traefik
 
 # Verificar logs do Traefik
 docker logs traefik --tail=100
+```
+
+### ModuleNotFoundError: No module named 'assets.i18n'
+
+**Causa:** O volume `./assets:/app/assets` monta o diretório do host, sobrescrevendo os arquivos `__init__.py` da imagem Docker.
+
+**Solução:**
+
+```bash
+# Executar o script que cria os arquivos necessários
+./fix-assets-init.sh
+
+# OU criar manualmente:
+mkdir -p assets/i18n assets/themes
+echo "# assets package" > assets/__init__.py
+echo "# i18n package" > assets/i18n/__init__.py
+echo "# themes package" > assets/themes/__init__.py
+
+# Reiniciar os containers
+docker-compose -f docker-compose.prod.yml restart
+```
+
+**Verificar se os arquivos foram criados:**
+
+```bash
+ls -la assets/__init__.py assets/i18n/__init__.py assets/themes/__init__.py
 ```
 
 ### Erro relacionado a GPU (se aparecer)
