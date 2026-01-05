@@ -9,6 +9,7 @@ import sys
 import base64
 import json
 import tempfile
+import asyncio
 from pathlib import Path
 from datetime import datetime
 from contextlib import asynccontextmanager
@@ -48,6 +49,47 @@ _WHISPER_READY = False
 _diarization_pipeline = None
 _DIARIZATION_READY = False
 _models_config = None
+
+
+# ==================== Funções auxiliares para threading ====================
+# 
+# IMPORTANTE: Estas funções executam operações síncronas pesadas (TTS, RVC, Whisper, Diarização)
+# em threads separadas usando asyncio.to_thread(). Isso permite que múltiplas requisições
+# sejam processadas em paralelo, evitando que uma requisição bloqueie outras.
+#
+# Sem threading, quando uma requisição está processando TTS/RVC, todas as outras ficam
+# aguardando, tornando a API inacessível durante o processamento.
+
+async def run_tts_script_async(*args, **kwargs):
+    """
+    Executa run_tts_script em uma thread separada para não bloquear o event loop.
+    Permite processamento paralelo de múltiplas requisições TTS + RVC.
+    """
+    return await asyncio.to_thread(run_tts_script, *args, **kwargs)
+
+
+async def run_tts_only_script_async(*args, **kwargs):
+    """
+    Executa run_tts_only_script em uma thread separada para não bloquear o event loop.
+    Permite processamento paralelo de múltiplas requisições TTS.
+    """
+    return await asyncio.to_thread(run_tts_only_script, *args, **kwargs)
+
+
+async def whisper_transcribe_async(whisper_model, *args, **kwargs):
+    """
+    Executa whisper_model.transcribe em uma thread separada para não bloquear o event loop.
+    Permite processamento paralelo de múltiplas transcrições.
+    """
+    return await asyncio.to_thread(whisper_model.transcribe, *args, **kwargs)
+
+
+async def diarization_pipeline_async(diarization_pipeline, *args, **kwargs):
+    """
+    Executa diarization_pipeline em uma thread separada para não bloquear o event loop.
+    Permite processamento paralelo de múltiplas diarizações.
+    """
+    return await asyncio.to_thread(diarization_pipeline, *args, **kwargs)
 
 
 def load_models_config():
@@ -821,9 +863,9 @@ async def generate(request: GenerateRequest, _: bool = Depends(verify_api_key)):
             print(f"   Voz TTS: {tts_voice}")
             print(f"   Formato: {output_format}")
             
-            # Gerar TTS
+            # Gerar TTS (em thread separada para não bloquear outras requisições)
             try:
-                message, output_file = run_tts_only_script(
+                message, output_file = await run_tts_only_script_async(
                     tts_file="",
                     tts_text=cleaned_text,
                     tts_voice=tts_voice,
@@ -920,9 +962,9 @@ async def generate(request: GenerateRequest, _: bool = Depends(verify_api_key)):
             print(f"   Index: {index_path}")
             print(f"   Formato: {output_format}")
             
-            # Chamar função do Applio para TTS + RVC
+            # Chamar função do Applio para TTS + RVC (em thread separada para não bloquear outras requisições)
             try:
-                message, output_file = run_tts_script(
+                message, output_file = await run_tts_script_async(
                     tts_file="",
                     tts_text=cleaned_text,
                     tts_voice=tts_voice,
@@ -1175,9 +1217,9 @@ async def tts_inference(request: TTSInferenceRequest, _: bool = Depends(verify_a
         print(f"   Modelo RVC: {actual_model_path}" + (f" (ID: {request.model_id})" if model_info else ""))
         print(f"   Index: {actual_index_path}")
         
-        # Chamar função do Applio
+        # Chamar função do Applio (em thread separada para não bloquear outras requisições)
         try:
-            message, output_file = run_tts_script(
+            message, output_file = await run_tts_script_async(
                 tts_file=tts_file,
                 tts_text=request.text,
                 tts_voice=request.tts_voice,
@@ -1369,8 +1411,9 @@ async def transcribe_audio(
         print(f"   Modelo: {model_size}")
         print(f"   Diarização: {enable_diarization}")
         
-        # Transcrever áudio com Whisper
-        result = whisper_model.transcribe(
+        # Transcrever áudio com Whisper (em thread separada para não bloquear outras requisições)
+        result = await whisper_transcribe_async(
+            whisper_model,
             str(temp_filepath),
             language=language if language != "auto" else None,
             word_timestamps=word_timestamps,
@@ -1399,8 +1442,8 @@ async def transcribe_audio(
                 if diarization_pipeline and _DIARIZATION_READY:
                     print(f"   🎤 Aplicando diarização...")
                     
-                    # Executar diarização
-                    diarization = diarization_pipeline(str(temp_filepath))
+                    # Executar diarização (em thread separada para não bloquear outras requisições)
+                    diarization = await diarization_pipeline_async(diarization_pipeline, str(temp_filepath))
                     
                     # Extrair speakers únicos
                     speakers_set = set()
@@ -1627,7 +1670,7 @@ async def merge_audio_with_title(
                 
                 rvc_output_path = os.path.join(OUTPUT_DIR, f"tts_rvc_title_{timestamp}.wav")
                 
-                message, tts_file = run_tts_script(
+                message, tts_file = await run_tts_script_async(
                     tts_file="",
                     tts_text=cleaned_title,
                     tts_voice=tts_voice,
@@ -1656,8 +1699,8 @@ async def merge_audio_with_title(
                 # Usar o arquivo RVC gerado
                 tts_output_path = rvc_output_path
             else:
-                # Usar apenas TTS (sem RVC)
-                message, tts_file = run_tts_only_script(
+                # Usar apenas TTS (sem RVC) - em thread separada
+                message, tts_file = await run_tts_only_script_async(
                     tts_file="",
                     tts_text=cleaned_title,
                     tts_voice=tts_voice,
